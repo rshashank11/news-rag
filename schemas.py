@@ -78,3 +78,15 @@ class SynthesizedAnswer(BaseModel):
     answer: str = Field(
         description="The final answer generated from the provided news sources."
     )
+
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+class ChatRequest(BaseModel):
+    question: str = Field(
+        min_length=2,
+        description="The user's question for news chatbot"
+    )
+    history: list[ChatMessage] = Field(default_factory=list)
+    

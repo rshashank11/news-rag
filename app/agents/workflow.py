@@ -262,17 +262,17 @@ def build_sources_and_context(documents: list[Any]) -> tuple[list[NewsSource], s
 
             headline = story.headline if story else metadata.get("headline", "Untitled")
             summary = story.summary if story else None
+            story_context = story.full_content if story else document.page_content
 
             sources.append(
                 NewsSource(
                     headline=headline,
                     summary=summary,
-                    match_snippet=document.page_content,
+                    match_snippet=story_context,
                     story_id=story_id,
                 )
             )
 
-            story_context = story.full_content if story else document.page_content
             context_block += (
                 f"\n[Source {len(sources)}]\n"
                 f"Headline: {headline}\n"

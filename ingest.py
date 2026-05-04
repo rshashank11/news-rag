@@ -57,7 +57,7 @@ docsearch = OpenSearchVectorSearch(
 
 
 def clean_html_text(raw_html: str) -> str:
-    return BeautifulSoup(raw_html, "html.parser").get_text().strip()
+    return BeautifulSoup(raw_html, "html.parser").get_text(" ", strip=True)
 
 
 def extract_full_content(data: dict) -> str:

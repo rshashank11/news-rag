@@ -189,10 +189,10 @@
 
             steps.forEach((step, index) => {
                 const item = document.createElement('div');
-                item.className = 'flex gap-3 items-start';
+                item.className = 'flex gap-4 items-start';
                 item.innerHTML = `
-                    <div class="mt-0.5 h-6 w-6 rounded-full bg-indigo-50 text-indigo-600 flex items-center justify-center text-xs font-bold">${index + 1}</div>
-                    <div>
+                    <div class="mt-0.5 h-6 w-6 min-w-6 shrink-0 rounded-full bg-indigo-50 text-indigo-600 flex items-center justify-center text-xs font-bold leading-none">${index + 1}</div>
+                    <div class="min-w-0">
                         <p class="text-sm font-bold text-gray-800">${escapeHtml(step.name)}</p>
                         ${step.detail ? `<p class="text-sm text-gray-500 mt-0.5">${escapeHtml(step.detail)}</p>` : ''}
                     </div>
@@ -230,7 +230,7 @@
                         </summary>
                         <div class="px-8 pb-8 pt-2">
                             ${source.summary ? `<p class="text-sm text-gray-500 mb-4">${escapeHtml(source.summary)}</p>` : ''}
-                            <div class="max-h-[320px] overflow-y-auto source-scroll pr-4 text-gray-600 leading-relaxed whitespace-pre-line text-sm border-t border-gray-100 pt-6">${escapeHtml(source.match_snippet || '')}</div>
+                            <div class="max-h-[520px] overflow-y-auto source-scroll pr-4 text-gray-600 leading-relaxed whitespace-pre-line text-sm border-t border-gray-100 pt-6">${escapeHtml(source.match_snippet || '')}</div>
                             ${source.story_id ? `<p class="mt-4 text-[10px] uppercase tracking-widest text-gray-300 font-bold">Story ID: ${escapeHtml(source.story_id)}</p>` : ''}
                         </div>
                     </details>
