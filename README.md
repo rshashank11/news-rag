@@ -13,7 +13,7 @@ FastAPI chatbot for searching and answering questions over ingested news stories
 
 The deployed app expects these runtime environment variables:
 
-- `DATABASE_URL`
+- `POSTGRESQL_URL` or `DATABASE_URL`
 - `OPENSEARCH_URL`
 - `OPENSEARCH_INDEX_NAME`
 - `OPENAI_API_KEY`

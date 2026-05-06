@@ -1,0 +1,23 @@
+services:
+  app:
+    build: .
+    container_name: news_rag_app
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+
+  ingest:
+    build: .
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    environment:
+      - OMP_NUM_THREADS=4
+      - MKL_NUM_THREADS=4
+      - TOKENIZERS_PARALLELISM=false
+    command: python ingest.py

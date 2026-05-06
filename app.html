@@ -1,11 +1,12 @@
-<!DOCTYPE html>
-<html lang="en">
+<!DOCTYPE html> <!-- Tells the browser this file uses modern HTML5. -->
+<html lang="en"> <!-- Root HTML element; lang="en" helps accessibility/search engines. -->
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>News RAG AI</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <meta charset="UTF-8"> <!-- Supports normal English text and special characters. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"> <!-- Makes layout responsive on mobile. -->
+    <title>News RAG AI</title> <!-- Browser tab title. -->
+    <script src="https://cdn.tailwindcss.com"></script> <!-- Loads Tailwind CSS from CDN for quick styling. -->
     <style>
+        /* Small custom CSS for animations and source-card highlighting. */
         .spinner { border-top-color: #4f46e5; animation: spin 1s linear infinite; }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
         .fade-in { animation: fadeIn 0.35s ease-out; }
@@ -22,8 +23,9 @@
         }
     </style>
 </head>
-<body class="bg-gray-50 min-h-screen text-gray-900">
+<body class="bg-gray-50 min-h-screen text-gray-900"> <!-- Main visible page body. -->
 
+    <!-- Top navigation bar. -->
     <nav class="bg-white border-b border-gray-200 sticky top-0 z-50">
         <div class="max-w-4xl mx-auto px-4 flex items-center justify-between">
             <div class="py-4 border-b-2 border-indigo-600 font-bold text-indigo-600">
@@ -33,8 +35,9 @@
         </div>
     </nav>
 
-    <main class="max-w-4xl mx-auto px-4 py-10">
+    <main class="max-w-4xl mx-auto px-4 py-10"> <!-- Main page content container. -->
         <section class="space-y-6">
+            <!-- Search input and Ask button. -->
             <div class="space-y-3">
                 <div class="relative">
                     <input type="text" id="searchInput"
@@ -47,14 +50,18 @@
                 </div>
             </div>
 
+            <!-- Loader shown while the backend is planning, retrieving, judging, and answering. -->
             <div id="searchLoader" class="hidden flex flex-col items-center py-20">
                 <div class="spinner rounded-full border-4 border-t-4 border-gray-200 h-12 w-12 mb-4"></div>
                 <p class="text-indigo-600 font-medium animate-pulse">Searching the newsroom...</p>
             </div>
 
+            <!-- Error box shown if the API request fails. -->
             <div id="errorArea" class="hidden bg-red-50 border border-red-100 text-red-700 p-5 rounded-2xl font-medium"></div>
 
+            <!-- Result area hidden until a response comes back from /chat. -->
             <div id="resultArea" class="hidden fade-in space-y-6">
+                <!-- Planner output: intent and search query. -->
                 <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div class="bg-indigo-50 p-4 rounded-xl border border-indigo-100">
                         <p class="text-[10px] uppercase font-bold text-indigo-400 mb-1 tracking-widest">Intent</p>
@@ -66,11 +73,13 @@
                     </div>
                 </div>
 
+                <!-- Entity panel: names/topics detected by the planner. -->
                 <div id="entityPanel" class="hidden bg-white p-4 rounded-xl border border-gray-200">
                     <p class="text-[10px] uppercase font-bold text-gray-400 mb-2 tracking-widest">Detected Entities</p>
                     <div id="entityList" class="flex flex-wrap gap-2"></div>
                 </div>
 
+                <!-- Main answer card. -->
                 <div class="bg-white rounded-3xl shadow-sm border border-gray-200 overflow-hidden">
                     <div class="bg-gray-50 px-6 py-3 border-b border-gray-100 flex justify-between items-center">
                         <span id="answerLabel" class="text-xs font-bold text-gray-400 uppercase tracking-widest">Answer</span>
@@ -82,11 +91,13 @@
                     <div id="answerText" class="p-8 text-lg leading-relaxed text-gray-800 whitespace-pre-wrap"></div>
                 </div>
 
+                <!-- Process/trace card: shows LangGraph steps to explain the workflow. -->
                 <div id="traceSection" class="bg-white rounded-2xl border border-gray-200 p-6">
                     <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4">Process</h3>
                     <div id="traceList" class="space-y-3"></div>
                 </div>
 
+                <!-- Source cards: evidence used by the answer. -->
                 <div id="sourceSection" class="space-y-4">
                     <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3 ml-2">News Sources</h3>
                     <div id="sourceList" class="space-y-4"></div>
@@ -96,128 +107,128 @@
     </main>
 
     <script>
-        const API_URL = window.location.origin;
+        const API_URL = window.location.origin; // Uses the same host/port as the current page, so local and deployed URLs both work.
 
-        function escapeHtml(value) {
-            return String(value ?? '')
-                .replaceAll('&', '&amp;')
-                .replaceAll('<', '&lt;')
-                .replaceAll('>', '&gt;')
-                .replaceAll('"', '&quot;')
-                .replaceAll("'", '&#039;');
+        function escapeHtml(value) { // Converts user/API text into safe HTML text.
+            return String(value ?? '') // Converts null/undefined into an empty string first.
+                .replaceAll('&', '&amp;') // Prevents "&" from being interpreted as HTML entity syntax.
+                .replaceAll('<', '&lt;') // Prevents injected opening HTML tags.
+                .replaceAll('>', '&gt;') // Prevents injected closing HTML tags.
+                .replaceAll('"', '&quot;') // Escapes double quotes.
+                .replaceAll("'", '&#039;'); // Escapes single quotes.
         }
 
-        async function executeChat() {
-            const queryInput = document.getElementById('searchInput');
-            const question = queryInput.value.trim();
-            if (!question) return;
+        async function executeChat() { // Sends the user's question to the backend.
+            const queryInput = document.getElementById('searchInput'); // Finds the input box.
+            const question = queryInput.value.trim(); // Reads and cleans the question.
+            if (!question) return; // Do nothing if the box is empty.
 
-            document.getElementById('resultArea').classList.add('hidden');
-            document.getElementById('errorArea').classList.add('hidden');
-            document.getElementById('searchLoader').classList.remove('hidden');
+            document.getElementById('resultArea').classList.add('hidden'); // Hide old results while new search runs.
+            document.getElementById('errorArea').classList.add('hidden'); // Hide old errors.
+            document.getElementById('searchLoader').classList.remove('hidden'); // Show loader.
 
-            try {
-                const response = await fetch(`${API_URL}/chat`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ question })
+            try { // Network/API call can fail, so we handle errors.
+                const response = await fetch(`${API_URL}/chat`, { // POST to FastAPI /chat endpoint.
+                    method: 'POST', // POST is used because we send a JSON body.
+                    headers: { 'Content-Type': 'application/json' }, // Tells backend we are sending JSON.
+                    body: JSON.stringify({ question }) // Sends the question as JSON.
                 });
 
-                if (!response.ok) {
-                    const detail = await response.text();
-                    throw new Error(detail || `Request failed with ${response.status}`);
+                if (!response.ok) { // If HTTP status is not 200-level...
+                    const detail = await response.text(); // Read backend error text.
+                    throw new Error(detail || `Request failed with ${response.status}`); // Trigger catch block.
                 }
 
-                const data = await response.json();
-                renderResponse(data);
-            } catch (err) {
-                const errorArea = document.getElementById('errorArea');
-                errorArea.textContent = `Chat request failed: ${err.message}`;
-                errorArea.classList.remove('hidden');
-            } finally {
-                document.getElementById('searchLoader').classList.add('hidden');
+                const data = await response.json(); // Parse successful JSON response.
+                renderResponse(data); // Render answer, sources, trace, and metadata.
+            } catch (err) { // Handles failed request or bad response.
+                const errorArea = document.getElementById('errorArea'); // Finds error UI box.
+                errorArea.textContent = `Chat request failed: ${err.message}`; // Shows readable error.
+                errorArea.classList.remove('hidden'); // Makes error visible.
+            } finally { // Always runs after success or failure.
+                document.getElementById('searchLoader').classList.add('hidden'); // Hide loader.
             }
         }
 
-        function renderResponse(data) {
-            const analysis = data.analysis || {};
-            const sources = data.sources || [];
+        function renderResponse(data) { // Updates the UI using the backend ChatResponse.
+            const analysis = data.analysis || {}; // Planner output; fallback to empty object.
+            const sources = data.sources || []; // Source list; fallback to empty array.
 
-            document.getElementById('intentDisplay').textContent = analysis.intent || data.type || 'unknown';
-            document.getElementById('searchQueryDisplay').textContent = analysis.search_query || '';
-            document.getElementById('sourceCount').textContent = `${sources.length} source${sources.length === 1 ? '' : 's'}`;
-            document.getElementById('execTime').textContent = data.execution_time_seconds ? `${data.execution_time_seconds}s` : '';
-            document.getElementById('answerLabel').textContent = data.type === 'clarification_needed' ? 'Clarification Needed' : 'AI Response';
-            document.getElementById('answerText').innerHTML = linkCitations(data.message || 'No response returned.');
+            document.getElementById('intentDisplay').textContent = analysis.intent || data.type || 'unknown'; // Shows planner intent.
+            document.getElementById('searchQueryDisplay').textContent = analysis.search_query || ''; // Shows planned search query.
+            document.getElementById('sourceCount').textContent = `${sources.length} source${sources.length === 1 ? '' : 's'}`; // Shows source count.
+            document.getElementById('execTime').textContent = data.execution_time_seconds ? `${data.execution_time_seconds}s` : ''; // Shows runtime.
+            document.getElementById('answerLabel').textContent = data.type === 'clarification_needed' ? 'Clarification Needed' : 'AI Response'; // Label changes for follow-up questions.
+            document.getElementById('answerText').innerHTML = linkCitations(data.message || 'No response returned.'); // Renders answer and clickable citations.
 
-            renderEntities(analysis.entities || []);
-            renderTrace(data.steps || []);
-            renderSources(sources);
+            renderEntities(analysis.entities || []); // Renders entity badges.
+            renderTrace(data.steps || []); // Renders workflow process steps.
+            renderSources(sources); // Renders source cards.
 
-            document.getElementById('resultArea').classList.remove('hidden');
+            document.getElementById('resultArea').classList.remove('hidden'); // Shows result area.
         }
 
-        function renderEntities(entities) {
-            const panel = document.getElementById('entityPanel');
-            const list = document.getElementById('entityList');
-            list.innerHTML = '';
+        function renderEntities(entities) { // Shows entities detected by the planner.
+            const panel = document.getElementById('entityPanel'); // Container for entity section.
+            const list = document.getElementById('entityList'); // Element where badges are inserted.
+            list.innerHTML = ''; // Clear old badges before rendering new ones.
 
-            if (!entities.length) {
-                panel.classList.add('hidden');
-                return;
+            if (!entities.length) { // If planner found no entities...
+                panel.classList.add('hidden'); // Hide entity panel.
+                return; // Stop here.
             }
 
-            entities.forEach(entity => {
-                const badge = document.createElement('span');
-                badge.className = 'bg-gray-100 text-gray-700 text-xs font-bold px-3 py-1 rounded-full';
-                badge.textContent = entity;
-                list.appendChild(badge);
+            entities.forEach(entity => { // Create one badge per entity.
+                const badge = document.createElement('span'); // New span element.
+                badge.className = 'bg-gray-100 text-gray-700 text-xs font-bold px-3 py-1 rounded-full'; // Badge styling.
+                badge.textContent = entity; // Use textContent so entity text is safe.
+                list.appendChild(badge); // Add badge to UI.
             });
 
-            panel.classList.remove('hidden');
+            panel.classList.remove('hidden'); // Show entity panel.
         }
 
-        function renderTrace(steps) {
-            const section = document.getElementById('traceSection');
-            const list = document.getElementById('traceList');
-            list.innerHTML = '';
+        function renderTrace(steps) { // Shows the process/trace steps from LangGraph.
+            const section = document.getElementById('traceSection'); // Process section container.
+            const list = document.getElementById('traceList'); // Where trace items are inserted.
+            list.innerHTML = ''; // Clear previous process steps.
 
-            if (!steps.length) {
-                section.classList.add('hidden');
-                return;
+            if (!steps.length) { // If backend sent no steps...
+                section.classList.add('hidden'); // Hide process section.
+                return; // Stop here.
             }
 
-            steps.forEach((step, index) => {
-                const item = document.createElement('div');
-                item.className = 'flex gap-4 items-start';
-                item.innerHTML = `
+            steps.forEach((step, index) => { // Render each workflow step in order.
+                const item = document.createElement('div'); // Create wrapper for this step.
+                item.className = 'flex gap-4 items-start'; // Layout: number circle + text.
+                item.innerHTML = ` <!-- Safe because step text is escaped before insertion below. -->
                     <div class="mt-0.5 h-6 w-6 min-w-6 shrink-0 rounded-full bg-indigo-50 text-indigo-600 flex items-center justify-center text-xs font-bold leading-none">${index + 1}</div>
                     <div class="min-w-0">
                         <p class="text-sm font-bold text-gray-800">${escapeHtml(step.name)}</p>
                         ${step.detail ? `<p class="text-sm text-gray-500 mt-0.5">${escapeHtml(step.detail)}</p>` : ''}
                     </div>
                 `;
-                list.appendChild(item);
+                list.appendChild(item); // Add step to process list.
             });
 
-            section.classList.remove('hidden');
+            section.classList.remove('hidden'); // Show process section.
         }
 
-        function renderSources(sources) {
-            const list = document.getElementById('sourceList');
-            list.innerHTML = '';
+        function renderSources(sources) { // Shows source cards returned by backend.
+            const list = document.getElementById('sourceList'); // Source list container.
+            list.innerHTML = ''; // Clear old source cards.
 
-            if (!sources.length) {
-                list.innerHTML = '<p class="text-gray-400 italic ml-2">No sources returned.</p>';
-                return;
+            if (!sources.length) { // If backend returned no sources...
+                list.innerHTML = '<p class="text-gray-400 italic ml-2">No sources returned.</p>'; // Show empty state.
+                return; // Stop here.
             }
 
-            sources.forEach((source, index) => {
-                const num = index + 1;
-                const card = document.createElement('div');
-                card.id = `source-card-${num}`;
-                card.className = 'bg-white rounded-2xl border border-gray-200 overflow-hidden transition-all duration-500';
-                card.innerHTML = `
+            sources.forEach((source, index) => { // Render one card per source.
+                const num = index + 1; // Human-friendly source number starts at 1.
+                const card = document.createElement('div'); // Wrapper for the source card.
+                card.id = `source-card-${num}`; // ID used by citation hyperlinks like #source-card-1.
+                card.className = 'bg-white rounded-2xl border border-gray-200 overflow-hidden transition-all duration-500'; // Card styling.
+                card.innerHTML = ` <!-- Source content; text fields are escaped before being inserted. -->
                     <details class="group">
                         <summary class="p-6 cursor-pointer flex justify-between items-center hover:bg-gray-50 transition-colors gap-4">
                             <div class="flex items-center gap-4 min-w-0">
@@ -229,37 +240,38 @@
                             </span>
                         </summary>
                         <div class="px-8 pb-8 pt-2">
+                            ${source.published_at ? `<p class="text-[10px] uppercase tracking-widest text-gray-400 font-bold mb-3">Published: ${escapeHtml(source.published_at)}</p>` : ''}
                             ${source.summary ? `<p class="text-sm text-gray-500 mb-4">${escapeHtml(source.summary)}</p>` : ''}
                             <div class="max-h-[520px] overflow-y-auto source-scroll pr-4 text-gray-600 leading-relaxed whitespace-pre-line text-sm border-t border-gray-100 pt-6">${escapeHtml(source.match_snippet || '')}</div>
                             ${source.story_id ? `<p class="mt-4 text-[10px] uppercase tracking-widest text-gray-300 font-bold">Story ID: ${escapeHtml(source.story_id)}</p>` : ''}
                         </div>
                     </details>
                 `;
-                list.appendChild(card);
+                list.appendChild(card); // Add card to source list.
             });
         }
 
-        function linkCitations(message) {
-            const escaped = escapeHtml(message);
-            return escaped.replace(/\[Source (\d+(?:,\s*\d+)*)\]/g, (match, group) => {
-                const links = group.split(',').map(value => {
-                    const sourceNumber = value.trim();
-                    return `<a href="#source-card-${sourceNumber}" onclick="highlightSource(${sourceNumber})" class="text-indigo-600 font-bold hover:underline">[${sourceNumber}]</a>`;
+        function linkCitations(message) { // Converts [Source 1] text into clickable links.
+            const escaped = escapeHtml(message); // Escape answer first to prevent HTML injection.
+            return escaped.replace(/\[Source (\d+(?:,\s*\d+)*)\]/g, (match, group) => { // Finds citation patterns.
+                const links = group.split(',').map(value => { // Supports citations like [Source 1, 2].
+                    const sourceNumber = value.trim(); // Clean spaces around source number.
+                    return `<a href="#source-card-${sourceNumber}" onclick="highlightSource(${sourceNumber})" class="text-indigo-600 font-bold hover:underline">[${sourceNumber}]</a>`; // Link jumps to matching source card.
                 });
-                return links.join(', ');
+                return links.join(', '); // Preserve comma-separated citation format.
             });
         }
 
-        function highlightSource(num) {
-            const card = document.getElementById(`source-card-${num}`);
-            if (!card) return;
+        function highlightSource(num) { // Opens and highlights a cited source card.
+            const card = document.getElementById(`source-card-${num}`); // Finds source card by ID.
+            if (!card) return; // Stop if source number does not exist.
 
-            const details = card.querySelector('details');
-            if (details) details.open = true;
+            const details = card.querySelector('details'); // Finds collapsible source details element.
+            if (details) details.open = true; // Opens the source card.
 
-            card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            card.classList.add('highlight-card');
-            setTimeout(() => card.classList.remove('highlight-card'), 2200);
+            card.scrollIntoView({ behavior: 'smooth', block: 'center' }); // Smooth-scrolls to the source.
+            card.classList.add('highlight-card'); // Adds temporary visual highlight.
+            setTimeout(() => card.classList.remove('highlight-card'), 2200); // Removes highlight after 2.2 seconds.
         }
     </script>
 </body>

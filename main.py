@@ -1,42 +1,48 @@
-import time
+import time  # Used to measure how long each chat request takes.
 
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi import FastAPI  # Web framework that exposes our API endpoints.
+from fastapi.responses import FileResponse  # Lets FastAPI return the frontend HTML file.
 
-from app.agents.workflow import chat_graph
-from schemas import ChatRequest, ChatResponse
-
-
-app = FastAPI(title="News RAG API")
+from app.agents.workflow import chat_graph  # Compiled LangGraph workflow for the chatbot.
+from database import ensure_database_schema  # Startup helper that makes sure required DB columns exist.
+from schemas import ChatRequest, ChatResponse  # Pydantic request/response models for /chat.
 
 
-@app.get("/")
-def read_root():
-    return FileResponse("app.html")
+app = FastAPI(title="News RAG API")  # Creates the FastAPI app object.
 
 
-@app.get("/health")
-def health_check():
-    return {"status": "ok"}
+@app.on_event("startup")  # Runs this function when the API server starts.
+def startup():  # Startup hook for one-time setup.
+    ensure_database_schema()  # Adds missing DB columns safely before requests come in.
 
 
-@app.post("/chat", response_model=ChatResponse)
-def chat(request: ChatRequest):
-    start_time = time.perf_counter()
-    result = chat_graph.invoke(
-        {
-            "question": request.question,
-            "analysis": None,
-            "current_query": None,
-            "documents": [],
-            "attempts": 0,
-            "context_enough": False,
-            "suggested_query": None,
-            "steps": [],
-            "response": None,
+@app.get("/")  # Handles GET requests to the homepage.
+def read_root():  # Homepage endpoint.
+    return FileResponse("app.html")  # Sends the simple frontend HTML to the browser.
+
+
+@app.get("/health")  # Health endpoint used to check whether the API is alive.
+def health_check():  # Simple health-check function.
+    return {"status": "ok"}  # Small JSON response meaning the app is running.
+
+
+@app.post("/chat", response_model=ChatResponse)  # Handles POST requests from the frontend chat box.
+def chat(request: ChatRequest):  # Receives a validated ChatRequest object.
+    start_time = time.perf_counter()  # Starts a timer so the UI can show execution time.
+    result = chat_graph.invoke(  # Runs the LangGraph workflow from start to finish.
+        {  # Initial state passed into the graph.
+            "question": request.question,  # User's raw question.
+            "analysis": None,  # Planner has not analyzed the question yet.
+            "current_query": None,  # No search query has been chosen yet.
+            "documents": [],  # No retrieved chunks at the start.
+            "attempts": 0,  # Retrieval has not run yet.
+            "context_enough": False,  # We assume context is not enough until checked.
+            "suggested_query": None,  # No rewritten query yet.
+            "steps": [],  # Empty trace list; nodes append human-readable process steps.
+            "response": None,  # Final response will be filled by a terminal graph node.
         }
     )
 
-    response = result["response"]
-    response.execution_time_seconds = round(time.perf_counter() - start_time, 2)
-    return response
+    response = result["response"]  # Pulls the final ChatResponse from the graph state.
+    response.execution_time_seconds = round(time.perf_counter() - start_time, 2)  # Adds total runtime in seconds.
+    return response  # Sends the answer, sources, trace steps, and timing back to the frontend.
