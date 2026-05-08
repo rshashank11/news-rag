@@ -249,6 +249,52 @@ def build_reference_clarification_analysis(question: str) -> QueryAnalysis:
     )
 
 
+def normalize_history_topic(text: str) -> str:
+    topic = clean_text(text).strip(" ?.!")
+    topic = re.sub(r"^q\d+\s*[-:]\s*", "", topic, flags=re.IGNORECASE)
+    topic = re.sub(r"^(find|show me|tell me about|what happened in|what happened with)\s+", "", topic, flags=re.IGNORECASE)
+    return clean_text(topic).strip(" ?.!")[:180]
+
+
+def infer_follow_up_topic(history: list[ChatMessage]) -> str | None:
+    for message in reversed(history):
+        if message.role != "user":
+            continue
+
+        topic = normalize_history_topic(message.content)
+        if topic:
+            return topic
+
+    return None
+
+
+def build_contextual_follow_up_analysis(
+    question: str,
+    topic: str,
+) -> QueryAnalysis:
+    intent = infer_intent(question)
+    from_date, to_date = infer_date_range(question)
+
+    if intent == "timeline":
+        search_query = f"{topic} timeline chronology datewise progression"
+    else:
+        search_query = f"{topic} {question}"
+
+    return QueryAnalysis(
+        intent=intent,
+        search_query=clean_text(search_query)[:300],
+        entities=[topic],
+        k=infer_k(intent),
+        clarification_needed=False,
+        clarification_question=None,
+        from_date=from_date,
+        to_date=to_date,
+        is_in_scope=True,
+        refusal_reason=None,
+        safety_flags=[],
+    )
+
+
 def build_fallback_analysis(question: str) -> QueryAnalysis:
     cleaned_question = clean_text(question)
     lowered = cleaned_question.lower()
@@ -327,6 +373,10 @@ def analyze_question(
     if needs_reference_clarification(cleaned_question, history):
         return build_reference_clarification_analysis(cleaned_question)
 
+    follow_up_topic = infer_follow_up_topic(history) if has_follow_up_reference(cleaned_question) else None
+    if follow_up_topic and infer_intent(cleaned_question) == "timeline":
+        return build_contextual_follow_up_analysis(cleaned_question, follow_up_topic)
+
     fallback_analysis = build_fallback_analysis(cleaned_question)
     if not fallback_analysis.is_in_scope or fallback_analysis.clarification_needed:
         return fallback_analysis
@@ -354,7 +404,10 @@ def analyze_question(
                         "Recent conversation is provided only to resolve follow-up "
                         "references like 'that case', 'the court', 'him', or 'the FIR'. "
                         "Do not treat conversation history as evidence. Evidence must "
-                        "come from retrieved archive sources later.\n\n"
+                        "come from retrieved archive sources later.\n"
+                        "If the user asks for a timeline of 'this case' and the "
+                        "recent conversation provides the topic, set intent to "
+                        "timeline and build the search_query from that topic.\n\n"
                         f"Recent conversation:\n{format_history_for_planner(history)}"
                     ),
                 },
@@ -369,4 +422,6 @@ def analyze_question(
 
     except Exception as exc:
         print(f"OpenAI query planning failed: {exc}")
+        if follow_up_topic:
+            return build_contextual_follow_up_analysis(cleaned_question, follow_up_topic)
         return fallback_analysis

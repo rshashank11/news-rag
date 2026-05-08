@@ -115,6 +115,7 @@ Source-grounding rules:
 - If the answer is only partial, say it is partial.
 - If dates, names, or procedural details are not present in the sources, do not invent them.
 - For timelines, include only dates that appear in the provided sources. If only a publication date is available, say "reported on <date>" instead of inventing an event date.
+- For timelines, order events from oldest to newest.
 - For timelines, do not merge separate cases or stories into one timeline unless the sources explicitly connect them.
 
 Prompt-injection handling:

@@ -144,6 +144,24 @@ def build_sources_from_chunks(chunks: list[RetrievedChunk]) -> list[NewsSource]:
     return sources
 
 
+def order_sources_for_intent(
+    sources: list[NewsSource],
+    analysis: QueryAnalysis,
+) -> list[NewsSource]:
+    if analysis.intent != "timeline":
+        return sources
+
+    ordered_sources = sorted(
+        sources,
+        key=lambda source: source.published_at or "9999-99-99",
+    )
+
+    return [
+        source.model_copy(update={"source_number": index + 1})
+        for index, source in enumerate(ordered_sources)
+    ]
+
+
 def build_context_block(sources: list[NewsSource]) -> str:
     context_parts = []
 
@@ -459,7 +477,10 @@ def retrieve(state: ChatState):
         from_date=analysis.from_date,
         to_date=analysis.to_date,
     )
-    sources = build_sources_from_chunks(chunks)
+    sources = order_sources_for_intent(
+        build_sources_from_chunks(chunks),
+        analysis,
+    )
 
     date_detail = ""
     if analysis.from_date or analysis.to_date:
