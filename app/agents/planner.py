@@ -61,6 +61,8 @@ TIMELINE_PATTERNS = [
     "timeline",
     "chronology",
     "sequence of events",
+    "datewise",
+    "date-wise",
 ]
 
 BRIEFING_PATTERNS = [
@@ -86,6 +88,14 @@ MONTHS = {
     "november": 11,
     "december": 12,
 }
+
+FOLLOW_UP_REFERENCE_PATTERNS = [
+    r"\bthis\s+(case|matter|petition|plea|fir|order|judgment|judgement|story|issue)\b",
+    r"\bthat\s+(case|matter|petition|plea|fir|order|judgment|judgement|story|issue)\b",
+    r"\bthe\s+(case|matter|petition|plea|fir|order|judgment|judgement|story|issue)\b",
+    r"\bsame\s+(case|matter|petition|plea|fir|order|judgment|judgement|story|issue)\b",
+    r"\babove\s+(case|matter|petition|plea|fir|order|judgment|judgement|story|issue)\b",
+]
 
 
 def contains_any(text: str, patterns: list[str]) -> bool:
@@ -190,21 +200,52 @@ def build_out_of_scope_analysis(
     )
 
 
-def build_clarification_analysis(question: str) -> QueryAnalysis:
+def build_clarification_analysis(
+    question: str,
+    clarification_question: str | None = None,
+) -> QueryAnalysis:
     return QueryAnalysis(
         intent="clarify",
         search_query=clean_text(question)[:300] or "clarification needed",
         entities=[],
         k=DEFAULT_K,
         clarification_needed=True,
-        clarification_question=(
-            "Could you add a person, case, court, organization, topic, or time period?"
-        ),
+        clarification_question=clarification_question
+        or "Could you add a person, case, court, organization, topic, or time period?",
         from_date=None,
         to_date=None,
         is_in_scope=True,
         refusal_reason=None,
         safety_flags=[],
+    )
+
+
+def has_follow_up_reference(question: str) -> bool:
+    lowered = question.lower()
+    return any(
+        re.search(pattern, lowered)
+        for pattern in FOLLOW_UP_REFERENCE_PATTERNS
+    )
+
+
+def has_recent_conversation_context(history: list[ChatMessage]) -> bool:
+    return any(clean_text(message.content) for message in history)
+
+
+def needs_reference_clarification(
+    question: str,
+    history: list[ChatMessage],
+) -> bool:
+    return has_follow_up_reference(question) and not has_recent_conversation_context(history)
+
+
+def build_reference_clarification_analysis(question: str) -> QueryAnalysis:
+    return build_clarification_analysis(
+        question,
+        (
+            "Which case or story should I build the timeline for? "
+            "Please mention a case name, party, court, person, organization, or news topic."
+        ),
     )
 
 
@@ -282,6 +323,9 @@ def analyze_question(
 
     if not cleaned_question or len(cleaned_question.split()) < 2:
         return build_clarification_analysis(cleaned_question)
+
+    if needs_reference_clarification(cleaned_question, history):
+        return build_reference_clarification_analysis(cleaned_question)
 
     fallback_analysis = build_fallback_analysis(cleaned_question)
     if not fallback_analysis.is_in_scope or fallback_analysis.clarification_needed:
