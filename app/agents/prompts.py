@@ -27,13 +27,14 @@ Planning rules:
 - If the user asks for a timeline, set intent to timeline and usually request more sources.
 - If the user asks for a roundup, digest, overview, or summary, set intent to briefing.
 - If the user asks a normal factual question, set intent to answer.
-- Choose k between 3 and 20.
+- Choose k between 3 and 80.
 
 Date rules:
 - Dates must be YYYY-MM-DD.
 - If the user mentions a year, use January 1 to December 31 of that year.
 - If the user mentions a month, use the first and last day of that month.
 - If the user uses relative dates like today, yesterday, last month, or this year, resolve them using the current date provided in the runtime context.
+- If the user asks for latest, recent, current, newest, fresh, or new updates, treat it as a recent-news request: set from_date to 90 days before the runtime current date, set to_date to the runtime current date, and set k to 80.
 - If no date or time window is mentioned, leave from_date and to_date as null.
 """
 

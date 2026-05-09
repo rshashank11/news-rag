@@ -60,7 +60,7 @@ class QueryAnalysis(StrictBaseModel):
     intent: Literal["answer", "briefing", "timeline", "clarify", "out_of_scope"]
     search_query: str = Field(min_length=1, max_length=300)
     entities: list[str] = Field(default_factory=list, max_length=20)
-    k: int = Field(default=10, ge=3, le=20)
+    k: int = Field(default=10, ge=3, le=80)
     clarification_needed: bool = False
     clarification_question: str | None = Field(default=None, max_length=300)
     from_date: str | None = None

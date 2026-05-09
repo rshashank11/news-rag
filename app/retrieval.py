@@ -6,7 +6,7 @@ from schemas import RetrievedChunk, clean_text
 
 
 MIN_TOP_K = 1
-MAX_TOP_K = 20
+MAX_TOP_K = 80
 
 
 def clamp_top_k(top_k: int | None) -> int:
@@ -38,7 +38,7 @@ def document_matches_date_filter(
     published_at = getattr(chunk, "published_at", None)
 
     if not published_at:
-        return True
+        return not (from_date or to_date)
 
     if from_date and published_at < from_date:
         return False

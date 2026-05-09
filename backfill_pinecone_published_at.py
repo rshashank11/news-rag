@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -84,52 +85,34 @@ def iter_metadata_updates(file_paths: list[str]):
                     }
 
 
-def update_metadata(index, namespace: str, update: dict):
-    index.update(
-        id=update["id"],
-        namespace=namespace,
-        set_metadata=update["metadata"],
-    )
-    return update
+def update_metadata(index, namespace: str, update: dict, retries: int):
+    for attempt in range(1, retries + 1):
+        try:
+            index.update(
+                id=update["id"],
+                namespace=namespace,
+                set_metadata=update["metadata"],
+            )
+            return update
+        except Exception:
+            if attempt == retries:
+                raise
+
+            time.sleep(min(2**attempt, 10))
 
 
-def run_backfill(file_paths: list[str], workers: int, dry_run: bool, limit: int | None):
-    updates = []
-
-    for update in iter_metadata_updates(file_paths):
-        updates.append(update)
-
-        if limit is not None and len(updates) >= limit:
-            break
-
-    print(f"Prepared {len(updates)} Pinecone metadata updates.")
-
-    if dry_run:
-        for update in updates[:5]:
-            print(f"DRY RUN {update['id']} -> {update['metadata']}")
-        return
-
-    load_dotenv()
-
-    api_key = os.environ.get("PINECONE_API_KEY")
-    index_host = os.environ.get("PINECONE_INDEX_HOST")
-    namespace = os.environ.get("PINECONE_NAMESPACE", "default")
-
-    if not api_key:
-        raise RuntimeError("PINECONE_API_KEY is missing.")
-
-    if not index_host:
-        raise RuntimeError("PINECONE_INDEX_HOST is missing.")
-
-    pc = Pinecone(api_key=api_key)
-    index = pc.Index(host=index_host)
-
-    completed = 0
-    failed = 0
-
+def process_update_batch(
+    index,
+    namespace: str,
+    updates: list[dict],
+    workers: int,
+    retries: int,
+    completed: int,
+    failed: int,
+) -> tuple[int, int]:
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = [
-            executor.submit(update_metadata, index, namespace, update)
+            executor.submit(update_metadata, index, namespace, update, retries)
             for update in updates
         ]
 
@@ -148,7 +131,91 @@ def run_backfill(file_paths: list[str], workers: int, dry_run: bool, limit: int 
             if completed <= 5:
                 print(f"Updated {completed_update['id']} from {completed_update['source']}")
 
-    print(f"Finished. Updated={completed}, failed={failed}.")
+    return completed, failed
+
+
+def run_backfill(
+    file_paths: list[str],
+    workers: int,
+    dry_run: bool,
+    limit: int | None,
+    batch_size: int,
+    start_at: int,
+    retries: int,
+):
+    if dry_run:
+        prepared = 0
+
+        for update in iter_metadata_updates(file_paths):
+            prepared += 1
+
+            if prepared <= 5:
+                print(f"DRY RUN {update['id']} -> {update['metadata']}")
+
+            if limit is not None and prepared >= limit:
+                break
+
+        print(f"Prepared {prepared} Pinecone metadata update(s).")
+        return
+
+    load_dotenv()
+
+    api_key = os.environ.get("PINECONE_API_KEY")
+    index_host = os.environ.get("PINECONE_INDEX_HOST")
+    namespace = os.environ.get("PINECONE_NAMESPACE", "default")
+
+    if not api_key:
+        raise RuntimeError("PINECONE_API_KEY is missing.")
+
+    if not index_host:
+        raise RuntimeError("PINECONE_INDEX_HOST is missing.")
+
+    pc = Pinecone(api_key=api_key)
+    index = pc.Index(host=index_host)
+
+    prepared = 0
+    completed = 0
+    failed = 0
+    batch = []
+
+    for update_number, update in enumerate(iter_metadata_updates(file_paths), start=1):
+        if update_number < start_at:
+            continue
+
+        batch.append(update)
+        prepared += 1
+
+        if len(batch) >= batch_size:
+            batch_start = update_number - len(batch) + 1
+            print(f"Processing prepared updates {batch_start}-{update_number}...")
+            completed, failed = process_update_batch(
+                index=index,
+                namespace=namespace,
+                updates=batch,
+                workers=workers,
+                retries=retries,
+                completed=completed,
+                failed=failed,
+            )
+            batch.clear()
+
+        if limit is not None and prepared >= limit:
+            break
+
+    if batch:
+        batch_start = update_number - len(batch) + 1
+        print(f"Processing prepared updates {batch_start}-{update_number}...")
+        completed, failed = process_update_batch(
+            index=index,
+            namespace=namespace,
+            updates=batch,
+            workers=workers,
+            retries=retries,
+            completed=completed,
+            failed=failed,
+        )
+
+    print(f"Finished. Prepared={prepared}, updated={completed}, failed={failed}.")
 
 
 def parse_args():
@@ -173,6 +240,24 @@ def parse_args():
         help="Only process this many chunk updates.",
     )
     parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1000,
+        help="Number of prepared updates to write before reading more input.",
+    )
+    parser.add_argument(
+        "--start-at",
+        type=int,
+        default=1,
+        help="Resume from this prepared update number.",
+    )
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=4,
+        help="Number of times to retry each Pinecone metadata update.",
+    )
+    parser.add_argument(
         "files",
         nargs="*",
         default=DEFAULT_DATA_FILES,
@@ -188,4 +273,7 @@ if __name__ == "__main__":
         workers=args.workers,
         dry_run=args.dry_run,
         limit=args.limit,
+        batch_size=args.batch_size,
+        start_at=args.start_at,
+        retries=args.retries,
     )
