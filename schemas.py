@@ -41,21 +41,6 @@ class ChatRequest(StrictBaseModel):
         return cleaned
 
 
-class SafetyAssessment(StrictBaseModel):
-    allowed: bool
-    category: Literal[
-        "allowed",
-        "out_of_scope",
-        "prompt_injection",
-        "legal_advice",
-        "privacy",
-        "harmful_request",
-        "unsupported_by_archive",
-    ] = "allowed"
-    reason: str = Field(min_length=1, max_length=500)
-    safe_response: str | None = Field(default=None, max_length=1000)
-
-
 class QueryAnalysis(StrictBaseModel):
     intent: Literal["answer", "briefing", "timeline", "clarify", "out_of_scope"]
     search_query: str = Field(min_length=1, max_length=300)
@@ -65,18 +50,7 @@ class QueryAnalysis(StrictBaseModel):
     clarification_question: str | None = Field(default=None, max_length=300)
     from_date: str | None = None
     to_date: str | None = None
-    is_in_scope: bool = True
     refusal_reason: str | None = Field(default=None, max_length=500)
-    safety_flags: list[
-        Literal[
-            "out_of_scope",
-            "prompt_injection",
-            "legal_advice",
-            "privacy",
-            "harmful_request",
-            "unsupported_by_archive",
-        ]
-    ] = Field(default_factory=list, max_length=8)
 
     @field_validator("search_query", "clarification_question", "refusal_reason")
     @classmethod
@@ -118,10 +92,7 @@ class QueryAnalysis(StrictBaseModel):
         if self.clarification_needed and not self.clarification_question:
             raise ValueError("A clarification question is required when clarification_needed is true.")
 
-        if self.intent == "out_of_scope":
-            self.is_in_scope = False
-
-        if not self.is_in_scope and not self.refusal_reason:
+        if self.intent == "out_of_scope" and not self.refusal_reason:
             raise ValueError("A refusal reason is required when the query is out of scope.")
 
         if self.from_date and self.to_date and self.from_date > self.to_date:
@@ -132,13 +103,10 @@ class QueryAnalysis(StrictBaseModel):
 
 class RetrievedChunk(StrictBaseModel):
     id: str
-    score: float | None = None
     story_id: str | None = None
-    chunk_index: int | None = Field(default=None, ge=0)
     headline: str = Field(default="Untitled", max_length=500)
     published_at: str | None = None
     chunk_text: str = Field(min_length=1, max_length=6000)
-    search_type: Literal["hybrid", "dense", "sparse", "unknown"] = "hybrid"
 
     @field_validator("published_at")
     @classmethod
@@ -153,11 +121,8 @@ class RetrievedChunk(StrictBaseModel):
 class NewsSource(StrictBaseModel):
     source_number: int = Field(ge=1)
     headline: str = Field(min_length=1, max_length=500)
-    summary: str | None = Field(default=None, max_length=1000)
     published_at: str | None = None
     match_snippet: str = Field(min_length=1, max_length=12000)
-    story_id: str | None = None
-    chunk_ids: list[str] = Field(default_factory=list, max_length=20)
 
     @field_validator("published_at")
     @classmethod
@@ -184,17 +149,12 @@ class ContextAssessment(StrictBaseModel):
     context_enough: bool
     relevance_score: int = Field(ge=0, le=10)
     reason: str = Field(min_length=1, max_length=1000)
-    missing_information: list[str] = Field(default_factory=list, max_length=10)
     suggested_query: str | None = Field(default=None, max_length=300)
-    supported_source_numbers: list[int] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")
     def validate_context_decision(self):
         if self.context_enough and self.relevance_score < 6:
             raise ValueError("context_enough requires relevance_score of at least 6.")
-
-        if self.context_enough and not self.supported_source_numbers:
-            raise ValueError("context_enough requires at least one supporting source.")
 
         if not self.context_enough and not self.reason:
             raise ValueError("A reason is required when context is insufficient.")
@@ -216,7 +176,6 @@ class SynthesizedAnswer(StrictBaseModel):
     answer: str = Field(min_length=1, max_length=6000)
     cited_source_numbers: list[int] = Field(default_factory=list, max_length=20)
     confidence: Literal["high", "medium", "low"] = "low"
-    legal_advice_disclaimer_needed: bool = False
     unable_to_answer: bool = False
 
     @model_validator(mode="after")
@@ -236,15 +195,11 @@ class ChatResponse(StrictBaseModel):
         "clarification_needed",
         "limited_answer",
         "out_of_scope",
-        "error",
     ]
     message: str = Field(min_length=1, max_length=8000)
-    analysis: QueryAnalysis | None = None
     sources: list[NewsSource] = Field(default_factory=list, max_length=10)
-    steps: list[TraceStep] = Field(default_factory=list, max_length=20)
     process_notes: list[ProcessNote] = Field(default_factory=list, max_length=10)
     execution_time_seconds: float | None = Field(default=None, ge=0)
-    safety: SafetyAssessment | None = None
 
     @model_validator(mode="after")
     def validate_response_shape(self):

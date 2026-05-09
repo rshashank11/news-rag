@@ -58,13 +58,10 @@ def format_match(match) -> RetrievedChunk | None:
 
     return RetrievedChunk(
         id=str(get_match_value(match, "id", "")),
-        score=get_match_value(match, "score"),
         story_id=metadata.get("story_id"),
-        chunk_index=metadata.get("chunk_index"),
         headline=metadata.get("headline") or "Untitled",
         published_at=metadata.get("published_at"),
         chunk_text=chunk_text,
-        search_type="hybrid",
     )
 
 

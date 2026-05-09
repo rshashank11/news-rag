@@ -24,7 +24,6 @@ from schemas import (
     QueryAnalysis,
     QueryRewrite,
     RetrievedChunk,
-    SafetyAssessment,
     SynthesizedAnswer,
     TraceStep,
 )
@@ -34,6 +33,8 @@ MAX_RETRIEVAL_ATTEMPTS = 2
 MAX_ANSWER_SOURCES = 6
 MAX_CONTEXT_CHARS_PER_SOURCE = 6000
 MAX_STORY_EXCERPT_CHARS = 5000
+MIN_TIMELINE_DATED_SOURCES = 2
+MIN_TIMELINE_RELEVANCE_SCORE = 5
 CITATION_PATTERN = re.compile(r"\[Source\s+(\d+)\]")
 
 client = make_chat_client()
@@ -130,11 +131,8 @@ def build_sources_from_chunks(chunks: list[RetrievedChunk]) -> list[NewsSource]:
             NewsSource(
                 source_number=len(sources) + 1,
                 headline=story.headline if story else chunk.headline,
-                summary=story.summary if story else None,
                 published_at=format_story_date(story) if story else chunk.published_at,
                 match_snippet=build_source_context(chunk, story),
-                story_id=chunk.story_id,
-                chunk_ids=[chunk.id],
             )
         )
 
@@ -172,7 +170,6 @@ def build_context_block(sources: list[NewsSource]) -> str:
                     f"[Source {source.source_number}]",
                     f"Headline: {source.headline}",
                     f"Published: {source.published_at or 'Unknown'}",
-                    f"Story ID: {source.story_id or 'Unknown'}",
                     f"Context: {source.match_snippet[:MAX_CONTEXT_CHARS_PER_SOURCE]}",
                 ]
             )
@@ -188,18 +185,35 @@ def extract_cited_source_numbers(answer_text: str) -> set[int]:
     }
 
 
-def valid_source_numbers(sources: list[NewsSource]) -> set[int]:
-    return {
-        source.source_number
+def cited_sources_for_answer(
+    answer: SynthesizedAnswer,
+    sources: list[NewsSource],
+) -> list[NewsSource]:
+    cited_numbers = (
+        set(answer.cited_source_numbers)
+        | extract_cited_source_numbers(answer.answer)
+    )
+
+    if not cited_numbers:
+        return sources
+
+    cited_sources = [
+        source
         for source in sources
-    }
+        if source.source_number in cited_numbers
+    ]
+
+    return cited_sources or sources
 
 
 def answer_has_valid_citations(answer: SynthesizedAnswer, sources: list[NewsSource]) -> bool:
     if answer.unable_to_answer:
         return True
 
-    available_numbers = valid_source_numbers(sources)
+    available_numbers = {
+        source.source_number
+        for source in sources
+    }
     cited_numbers = set(answer.cited_source_numbers)
     inline_numbers = extract_cited_source_numbers(answer.answer)
 
@@ -402,7 +416,7 @@ def route_after_planning(
 ) -> Literal["out_of_scope", "ask_clarification", "retrieve"]:
     analysis = require_analysis(state)
 
-    if not analysis.is_in_scope:
+    if analysis.intent == "out_of_scope":
         return "out_of_scope"
 
     if analysis.clarification_needed:
@@ -422,21 +436,13 @@ def out_of_scope(state: ChatState):
         "response": ChatResponse(
             type="out_of_scope",
             message=message,
-            analysis=analysis,
             sources=[],
-            steps=steps,
             process_notes=build_process_notes(
                 analysis=analysis,
                 sources=[],
                 steps=steps,
                 response_type="out_of_scope",
                 reason=message,
-            ),
-            safety=SafetyAssessment(
-                allowed=False,
-                category=analysis.safety_flags[0] if analysis.safety_flags else "out_of_scope",
-                reason=message,
-                safe_response=message,
             ),
         )
     }
@@ -453,9 +459,7 @@ def ask_clarification(state: ChatState):
         "response": ChatResponse(
             type="clarification_needed",
             message=message,
-            analysis=analysis,
             sources=[],
-            steps=steps,
             process_notes=build_process_notes(
                 analysis=analysis,
                 sources=[],
@@ -539,9 +543,26 @@ def check_context(state: ChatState):
             text_format=ContextAssessment,
         )
         assessment = response.output_parsed
+        dated_source_count = sum(
+            1
+            for source in sources
+            if source.published_at
+        )
+        timeline_supported = (
+            analysis.intent == "timeline"
+            and assessment.relevance_score >= MIN_TIMELINE_RELEVANCE_SCORE
+            and dated_source_count >= MIN_TIMELINE_DATED_SOURCES
+        )
+        context_enough = assessment.context_enough or timeline_supported
+        timeline_note = ""
+        if timeline_supported and not assessment.context_enough:
+            timeline_note = (
+                " Accepted because timeline requests can be answered from "
+                "multiple directly relevant dated stories."
+            )
 
         return {
-            "context_enough": assessment.context_enough,
+            "context_enough": context_enough,
             "suggested_query": assessment.suggested_query,
             "steps": state.get("steps", [])
             + [
@@ -549,7 +570,7 @@ def check_context(state: ChatState):
                     name="Judged context",
                     detail=(
                         f"Score {assessment.relevance_score}/10. "
-                        f"{assessment.reason}"
+                        f"{assessment.reason}{timeline_note}"
                     ),
                 )
             ],
@@ -657,11 +678,12 @@ def answer(state: ChatState):
                 state,
                 "The generated answer did not pass citation validation.",
             )
+        cited_sources = cited_sources_for_answer(synthesized_answer, sources)
         steps = state.get("steps", []) + [
             TraceStep(
                 name="Generated answer",
                 detail=(
-                    f"Used {len(sources)} source(s). "
+                    f"Used {len(cited_sources)} source(s). "
                     f"Confidence: {synthesized_answer.confidence}."
                 ),
             )
@@ -671,12 +693,10 @@ def answer(state: ChatState):
             "response": ChatResponse(
                 type="answer",
                 message=synthesized_answer.answer,
-                analysis=analysis,
-                sources=sources,
-                steps=steps,
+                sources=cited_sources,
                 process_notes=build_process_notes(
                     analysis=analysis,
-                    sources=sources,
+                    sources=cited_sources,
                     steps=steps,
                     response_type="answer",
                 ),
@@ -702,24 +722,13 @@ def limited_answer_with_reason(state: ChatState, reason: str):
                 "to answer confidently. Try adding a case name, court, person, "
                 "organization, topic, or time period."
             ),
-            analysis=analysis,
             sources=[],
-            steps=steps,
             process_notes=build_process_notes(
                 analysis=analysis,
                 sources=state.get("sources", []),
                 steps=steps,
                 response_type="limited_answer",
                 reason=reason,
-            ),
-            safety=SafetyAssessment(
-                allowed=True,
-                category="unsupported_by_archive",
-                reason=reason,
-                safe_response=(
-                    "I could not find enough directly supported indexed news context "
-                    "to answer confidently."
-                ),
             ),
         )
     }
