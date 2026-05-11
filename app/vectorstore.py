@@ -43,13 +43,18 @@ def hybrid_query(
     sparse_vector: dict,
     top_k: int | None = None,
     alpha: float | None = None,
+    metadata_filter: dict | None = None,
 ):
     dense_weight, sparse_weight = get_hybrid_weights(alpha)
+    query_kwargs = {
+        "vector": scale_dense_vector(dense_vector, dense_weight),
+        "sparse_vector": scale_sparse_vector(sparse_vector, sparse_weight),
+        "top_k": top_k or settings.retrieval_top_k,
+        "namespace": settings.pinecone_namespace,
+        "include_metadata": True,
+    }
 
-    return get_index().query(
-        vector=scale_dense_vector(dense_vector, dense_weight),
-        sparse_vector=scale_sparse_vector(sparse_vector, sparse_weight),
-        top_k=top_k or settings.retrieval_top_k,
-        namespace=settings.pinecone_namespace,
-        include_metadata=True,
-    )
+    if metadata_filter is not None:
+        query_kwargs["filter"] = metadata_filter
+
+    return get_index().query(**query_kwargs)

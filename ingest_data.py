@@ -70,6 +70,43 @@ def timestamp_ms_to_date_string(value) -> str | None:
     return published_at.date().isoformat()
 
 
+def date_string_to_yyyymmdd(value: str | None) -> int | None:
+    if value is None:
+        return None
+
+    return int(value.replace("-", ""))
+
+
+def normalized_metadata_values(values: list[str]) -> list[str]:
+    normalized_values = []
+    seen = set()
+
+    for value in values:
+        normalized_value = re.sub(r"\s+", " ", value).strip().lower()
+
+        if normalized_value and normalized_value not in seen:
+            normalized_values.append(normalized_value)
+            seen.add(normalized_value)
+
+    return normalized_values
+
+
+def extract_tag_names(data: dict) -> list[str]:
+    return [
+        tag.get("name")
+        for tag in data.get("tags", [])
+        if tag.get("name")
+    ]
+
+
+def extract_category_names(data: dict) -> list[str]:
+    return [
+        section.get("name")
+        for section in data.get("sections", [])
+        if section.get("name")
+    ]
+
+
 def embed_texts(texts: list[str]) -> list[list[float]]:
     response = client.embeddings.create(
         model=get_embedding_model(),
@@ -251,6 +288,11 @@ def flush_chunks(index, namespace, pending_chunks, bm25_encoder):
                     "chunk_index": chunk["chunk_index"],
                     "headline": chunk["headline"],
                     "published_at": chunk["published_at"],
+                    "published_at_yyyymmdd": chunk["published_at_yyyymmdd"],
+                    "topics": chunk["topics"],
+                    "topics_normalized": chunk["topics_normalized"],
+                    "categories": chunk["categories"],
+                    "categories_normalized": chunk["categories_normalized"],
                     "chunk_text": chunk["chunk_text"],
                 },
             }
@@ -303,6 +345,11 @@ def ingest_files(file_paths: list[str]):
             full_content = build_full_content(paragraphs)
             published_at = timestamp_ms_to_datetime(data.get("published-at"))
             published_at_date = timestamp_ms_to_date_string(data.get("published-at"))
+            published_at_yyyymmdd = date_string_to_yyyymmdd(published_at_date)
+            topics = extract_tag_names(data)
+            categories = extract_category_names(data)
+            topics_normalized = normalized_metadata_values(topics)
+            categories_normalized = normalized_metadata_values(categories)
 
             existing_story = db.get(StoryMetaData, story_id)
 
@@ -312,16 +359,8 @@ def ingest_files(file_paths: list[str]):
                     headline=data.get("headline", "Untitled"),
                     summary=data.get("seo", {}).get("meta-description", ""),
                     published_at=published_at,
-                    topics=[
-                        tag.get("name")
-                        for tag in data.get("tags", [])
-                        if tag.get("name")
-                    ],
-                    categories=[
-                        section.get("name")
-                        for section in data.get("sections", [])
-                        if section.get("name")
-                    ],
+                    topics=topics,
+                    categories=categories,
                     full_content=full_content,
                 )
 
@@ -335,6 +374,11 @@ def ingest_files(file_paths: list[str]):
                         "chunk_index": chunk_index,
                         "headline": data.get("headline", "Untitled"),
                         "published_at": published_at_date,
+                        "published_at_yyyymmdd": published_at_yyyymmdd,
+                        "topics": topics,
+                        "topics_normalized": topics_normalized,
+                        "categories": categories,
+                        "categories_normalized": categories_normalized,
                         "chunk_text": paragraph,
                         "source_path": str(path),
                         "source_line": line_number,

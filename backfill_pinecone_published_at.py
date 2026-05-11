@@ -57,6 +57,43 @@ def timestamp_ms_to_date_string(value) -> str | None:
     return published_at.date().isoformat()
 
 
+def date_string_to_yyyymmdd(value: str | None) -> int | None:
+    if value is None:
+        return None
+
+    return int(value.replace("-", ""))
+
+
+def normalized_metadata_values(values: list[str]) -> list[str]:
+    normalized_values = []
+    seen = set()
+
+    for value in values:
+        normalized_value = re.sub(r"\s+", " ", value).strip().lower()
+
+        if normalized_value and normalized_value not in seen:
+            normalized_values.append(normalized_value)
+            seen.add(normalized_value)
+
+    return normalized_values
+
+
+def extract_tag_names(data: dict) -> list[str]:
+    return [
+        tag.get("name")
+        for tag in data.get("tags", [])
+        if tag.get("name")
+    ]
+
+
+def extract_category_names(data: dict) -> list[str]:
+    return [
+        section.get("name")
+        for section in data.get("sections", [])
+        if section.get("name")
+    ]
+
+
 def iter_metadata_updates(file_paths: list[str]):
     for file_path in file_paths:
         path = Path(file_path)
@@ -69,6 +106,9 @@ def iter_metadata_updates(file_paths: list[str]):
                 data = json.loads(line)
                 story_id = data.get("id")
                 published_at = timestamp_ms_to_date_string(data.get("published-at"))
+                published_at_yyyymmdd = date_string_to_yyyymmdd(published_at)
+                topics = extract_tag_names(data)
+                categories = extract_category_names(data)
 
                 if not story_id or not published_at:
                     continue
@@ -80,6 +120,11 @@ def iter_metadata_updates(file_paths: list[str]):
                         "id": f"{story_id}-{chunk_index}",
                         "metadata": {
                             "published_at": published_at,
+                            "published_at_yyyymmdd": published_at_yyyymmdd,
+                            "topics": topics,
+                            "topics_normalized": normalized_metadata_values(topics),
+                            "categories": categories,
+                            "categories_normalized": normalized_metadata_values(categories),
                         },
                         "source": f"{path.name}:{line_number}",
                     }

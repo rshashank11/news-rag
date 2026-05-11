@@ -35,6 +35,8 @@ MAX_CONTEXT_CHARS_PER_SOURCE = 6000
 MAX_STORY_EXCERPT_CHARS = 5000
 MIN_TIMELINE_DATED_SOURCES = 2
 MIN_TIMELINE_RELEVANCE_SCORE = 5
+MIN_PARTIAL_BRIEFING_RELEVANCE_SCORE = 4
+MIN_NEGATIVE_LIST_RELEVANCE_SCORE = 3
 CITATION_PATTERN = re.compile(r"\[Source\s+(\d+)\]")
 
 client = make_chat_client()
@@ -229,6 +231,115 @@ def answer_has_valid_citations(answer: SynthesizedAnswer, sources: list[NewsSour
     return inline_numbers.issubset(available_numbers)
 
 
+def question_requests_exhaustive_coverage(question: str) -> bool:
+    normalized_question = question.lower()
+    exhaustive_terms = [
+        "all ",
+        "every ",
+        "each ",
+        "this month",
+        "which grounds were most commonly cited",
+    ]
+
+    return any(term in normalized_question for term in exhaustive_terms)
+
+
+def question_allows_negative_list_answer(question: str) -> bool:
+    normalized_question = question.lower()
+    negative_list_terms = [
+        "did any",
+        "were any",
+        "are any",
+        "which of these",
+        "of these",
+        "list only those",
+    ]
+
+    return any(term in normalized_question for term in negative_list_terms)
+
+
+def requires_employment_arbitration_scope(state: ChatState, analysis: QueryAnalysis) -> bool:
+    text = " ".join(
+        [
+            state["question"],
+            analysis.search_query,
+            state.get("current_query") or "",
+        ]
+    ).lower()
+
+    has_arbitration = "arbitration" in text or "arbitrator" in text
+    has_employment = "employment" in text or "employee" in text
+
+    return has_arbitration and has_employment
+
+
+def source_supports_employment_arbitration(source: NewsSource) -> bool:
+    text = f"{source.headline} {source.match_snippet}".lower()
+    has_arbitration = "arbitration" in text or "arbitrator" in text
+    has_unilateral = "unilateral" in text or "unilaterally" in text
+    has_employment = (
+        "employment contract" in text
+        or "employment agreement" in text
+    )
+
+    return has_arbitration and has_unilateral and has_employment
+
+
+def answer_coverage_note(state: ChatState, analysis: QueryAnalysis) -> str:
+    notes = []
+    normalized_question = state["question"].lower()
+
+    if analysis.from_date or analysis.to_date:
+        notes.append(
+            "Resolved date window: "
+            f"{analysis.from_date or 'earliest indexed date'} to "
+            f"{analysis.to_date or 'latest indexed date'}."
+        )
+
+    partial_briefing = any(
+        step.detail and "Accepted as a partial briefing" in step.detail
+        for step in state.get("steps", [])
+    )
+
+    if partial_briefing or (
+        analysis.intent == "briefing"
+        and question_requests_exhaustive_coverage(state["question"])
+    ):
+        notes.append(
+            "Coverage instruction: answer only from the retrieved indexed stories. "
+            "If the sources do not prove exhaustive coverage, start by saying the "
+            "answer is based on the indexed stories found and cannot confirm every "
+            "order in the period."
+        )
+
+    if question_allows_negative_list_answer(state["question"]):
+        notes.append(
+            "List instruction: if the retrieved sources cover the candidate stories "
+            "but do not explicitly identify any item matching the requested criterion, "
+            "say that no matching item was found in the retrieved indexed stories. "
+            "Still cite the source or sources reviewed."
+        )
+
+    if requires_employment_arbitration_scope(state, analysis):
+        notes.append(
+            "Scope instruction: the answer must stay within employment-contract "
+            "arbitration sources. General unilateral arbitrator appointment cases "
+            "outside employment contracts may be mentioned only as non-answer "
+            "background, not as matching cases."
+        )
+
+    if "resolution professional" in normalized_question:
+        notes.append(
+            "Role instruction: list only people explicitly described as a resolution "
+            "professional, RP, interim resolution professional, or IRP. If the "
+            "sources only list advocates or party representatives, say that no "
+            "resolution professional names were explicitly identified and cite the "
+            "sources reviewed."
+        )
+
+    return "\n".join(notes) or "No additional coverage constraints."
+
+
 def describe_topic(analysis: QueryAnalysis) -> str:
     if analysis.entities:
         return ", ".join(analysis.entities[:4])
@@ -259,6 +370,20 @@ def extract_score_from_steps(steps: list[TraceStep]) -> str | None:
             return match.group(1)
 
     return None
+
+
+def extract_relevance_scores_from_steps(steps: list[TraceStep]) -> list[int]:
+    scores = []
+
+    for step in steps:
+        if step.name != "Judged context" or not step.detail:
+            continue
+
+        match = re.search(r"Score\s+(\d+)/10", step.detail)
+        if match:
+            scores.append(int(match.group(1)))
+
+    return scores
 
 
 def build_process_notes(
@@ -548,19 +673,71 @@ def check_context(state: ChatState):
             for source in sources
             if source.published_at
         )
+        missing_required_scope = (
+            requires_employment_arbitration_scope(state, analysis)
+            and not any(source_supports_employment_arbitration(source) for source in sources)
+        )
         timeline_supported = (
             analysis.intent == "timeline"
+            and not missing_required_scope
             and assessment.relevance_score >= MIN_TIMELINE_RELEVANCE_SCORE
             and dated_source_count >= MIN_TIMELINE_DATED_SOURCES
         )
-        context_enough = assessment.context_enough or timeline_supported
+        partial_briefing_supported = (
+            analysis.intent == "briefing"
+            and not missing_required_scope
+            and state["attempts"] >= MAX_RETRIEVAL_ATTEMPTS
+            and max(
+                [
+                    assessment.relevance_score,
+                    *extract_relevance_scores_from_steps(state.get("steps", [])),
+                ]
+            )
+            >= MIN_PARTIAL_BRIEFING_RELEVANCE_SCORE
+        )
+        negative_list_supported = (
+            analysis.intent == "answer"
+            and not missing_required_scope
+            and state["attempts"] >= MAX_RETRIEVAL_ATTEMPTS
+            and question_allows_negative_list_answer(state["question"])
+            and max(
+                [
+                    assessment.relevance_score,
+                    *extract_relevance_scores_from_steps(state.get("steps", [])),
+                ]
+            )
+            >= MIN_NEGATIVE_LIST_RELEVANCE_SCORE
+        )
+        context_enough = (
+            (assessment.context_enough and not missing_required_scope)
+            or timeline_supported
+            or partial_briefing_supported
+            or negative_list_supported
+        )
+        scope_note = ""
+        if missing_required_scope:
+            scope_note = (
+                " Rejected because the retrieved sources do not satisfy the required "
+                "employment-contract arbitration setting."
+            )
         timeline_note = ""
         if timeline_supported and not assessment.context_enough:
             timeline_note = (
                 " Accepted because timeline requests can be answered from "
                 "multiple directly relevant dated stories."
             )
-
+        partial_briefing_note = ""
+        if partial_briefing_supported and not assessment.context_enough:
+            partial_briefing_note = (
+                " Accepted as a partial briefing because the sources are directly "
+                "relevant, but the answer must avoid claiming exhaustive coverage."
+            )
+        negative_list_note = ""
+        if negative_list_supported and not assessment.context_enough:
+            negative_list_note = (
+                " Accepted for a negative list answer because the sources cover the "
+                "candidate stories but do not show the requested criterion."
+            )
         return {
             "context_enough": context_enough,
             "suggested_query": assessment.suggested_query,
@@ -570,7 +747,8 @@ def check_context(state: ChatState):
                     name="Judged context",
                     detail=(
                         f"Score {assessment.relevance_score}/10. "
-                        f"{assessment.reason}{timeline_note}"
+                        f"{assessment.reason}{scope_note}{timeline_note}"
+                        f"{partial_briefing_note}{negative_list_note}"
                     ),
                 )
             ],
@@ -652,6 +830,7 @@ def answer(state: ChatState):
     analysis = require_analysis(state)
     sources = state["sources"]
     context_block = build_context_block(sources)
+    coverage_note = answer_coverage_note(state, analysis)
 
     try:
         response = client.responses.parse(
@@ -664,7 +843,8 @@ def answer(state: ChatState):
                 {
                     "role": "user",
                     "content": (
-                        f"Question: {state['question']}\n\n"
+                        f"Question: {state['question']}\n"
+                        f"{coverage_note}\n\n"
                         f"Approved sources:\n{context_block}"
                     ),
                 },
