@@ -104,8 +104,13 @@ class QueryAnalysis(StrictBaseModel):
 class RetrievedChunk(StrictBaseModel):
     id: str
     story_id: str | None = None
+    chunk_index: int | None = Field(default=None, ge=0)
     headline: str = Field(default="Untitled", max_length=500)
     published_at: str | None = None
+    topics: list[str] = Field(default_factory=list, max_length=50)
+    categories: list[str] = Field(default_factory=list, max_length=50)
+    retrieval_score: float | None = None
+    rerank_score: float | None = None
     chunk_text: str = Field(min_length=1, max_length=6000)
 
     @field_validator("published_at")
