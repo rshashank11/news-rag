@@ -1447,24 +1447,46 @@
             if (block) block.remove();
         }
 
-        function renderResponse(data, turnId) {
-            removeThinkingBlock(turnId);
+        function finalizeThinkingBlock(turnId, data, elapsed, sources) {
+            const block = document.getElementById(`thinking-${turnId}`);
+            if (!block) return null;
 
+            block.querySelectorAll('.process-item.active')
+                .forEach(item => item.classList.remove('active'));
+
+            const summary = block.querySelector('summary');
+            if (summary) {
+                summary.textContent = processLabel(data.type, elapsed);
+            }
+
+            const list = block.querySelector('.process-list');
+            if (list && sources.length) {
+                list.insertAdjacentHTML('beforeend', renderSourceStrip(sources, turnId));
+            }
+
+            block.open = false;
+            return block;
+        }
+
+        function renderResponse(data, turnId) {
             const elapsed = data.execution_time_seconds ?? ((performance.now() - currentRequestStartedAt) / 1000);
             const sources = data.sources || [];
             const processNotes = data.process_notes || [];
+            const liveProcess = finalizeThinkingBlock(turnId, data, elapsed, sources);
 
-            const process = document.createElement('details');
-            process.className = 'process';
-            process.open = false;
-            process.innerHTML = `
-                <summary>${processLabel(data.type, elapsed)}</summary>
-                <div class="process-list">
-                    ${renderProcessNotes(processNotes, sources, turnId)}
-                    ${renderSourceStrip(sources, turnId)}
-                </div>
-            `;
-            chatStream.appendChild(process);
+            if (!liveProcess) {
+                const process = document.createElement('details');
+                process.className = 'process';
+                process.open = false;
+                process.innerHTML = `
+                    <summary>${processLabel(data.type, elapsed)}</summary>
+                    <div class="process-list">
+                        ${renderProcessNotes(processNotes, sources, turnId)}
+                        ${renderSourceStrip(sources, turnId)}
+                    </div>
+                `;
+                chatStream.appendChild(process);
+            }
 
             const answer = document.createElement('article');
             answer.className = 'assistant-block';

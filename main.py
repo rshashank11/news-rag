@@ -6,7 +6,15 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
 from app.agents.workflow import chat_graph
-from schemas import ChatMessage, ChatRequest, ChatResponse, NewsSource, QueryAnalysis, TraceStep
+from schemas import (
+    ChatMessage,
+    ChatRequest,
+    ChatResponse,
+    NewsSource,
+    ProcessNote,
+    QueryAnalysis,
+    TraceStep,
+)
 
 
 app = FastAPI(title="News Chatbot API")
@@ -143,67 +151,122 @@ def stream_note(
     )
 
 
-def process_event_for_node(node_name: str, update: dict) -> str | None:
+def make_process_note(
+    title: str,
+    detail: str,
+    source_numbers: list[int] | None = None,
+) -> ProcessNote:
+    return ProcessNote(
+        title=title,
+        detail=detail[:700],
+        source_numbers=source_numbers or [],
+    )
+
+
+def process_note_for_node(
+    node_name: str,
+    update: dict,
+) -> tuple[ProcessNote | None, list[NewsSource]]:
     analysis = update.get("analysis")
     sources = update.get("sources") or []
     steps = update.get("steps") or []
 
     if node_name == "plan_query" and analysis:
-        return stream_note(
-            "Planning the answer",
-            (
-                f"I treated this as a request to {describe_intent(analysis)} "
-                f"using Bar & Bench news stories about {describe_topic(analysis)}."
+        return (
+            make_process_note(
+                title="Planning the answer",
+                detail=(
+                    f"I treated this as a request to {describe_intent(analysis)} "
+                    f"using Bar & Bench news stories about {describe_topic(analysis)}."
+                ),
             ),
+            [],
         )
 
     if node_name == "retrieve" and sources:
-        return stream_note(
-            "Reviewing news stories",
-            (
-                f"I found {len(sources)} usable news "
-                f"{'story' if len(sources) == 1 else 'stories'} "
-                "from the page data and kept them available below."
+        return (
+            make_process_note(
+                title="Reviewing news stories",
+                detail=(
+                    f"I found {len(sources)} usable news "
+                    f"{'story' if len(sources) == 1 else 'stories'} "
+                    "from the page data and kept them available below."
+                ),
+                source_numbers=[
+                    source.source_number
+                    for source in sources
+                ],
             ),
-            [
-                source.source_number
-                for source in sources
-            ],
             sources,
         )
 
     if node_name == "check_context":
         detail = latest_step_detail(steps, "Judged context") or ""
-        return stream_note(
-            "Checking source support",
-            detail.replace("Score", "Source support score", 1)
-            or "I checked whether the retrieved stories directly support an answer.",
+        return (
+            make_process_note(
+                title="Checking source support",
+                detail=(
+                    detail.replace("Score", "Source support score", 1)
+                    or "I checked whether the retrieved stories directly support an answer."
+                ),
+            ),
+            [],
         )
 
     if node_name == "rewrite_query":
-        return stream_note(
-            "Refining the search",
-            (
-                "The first pass was not strong enough, so I tried a more focused "
-                "version of the story search."
+        return (
+            make_process_note(
+                title="Refining the search",
+                detail=(
+                    "The first pass was not strong enough, so I tried a more focused "
+                    "version of the story search."
+                ),
             ),
+            [],
         )
 
     if node_name == "answer":
-        return stream_note(
-            "Preparing the response",
-            "I wrote the answer from the selected stories and kept citations tied to those story sources.",
+        return (
+            make_process_note(
+                title="Preparing the response",
+                detail=(
+                    "I wrote the answer from the selected stories and kept citations "
+                    "tied to those story sources."
+                ),
+            ),
+            [],
         )
 
     if node_name in {"limited_answer", "out_of_scope", "ask_clarification"}:
         response = update.get("response")
         if response:
-            return stream_note(
-                "Stopping safely" if node_name != "ask_clarification" else "Asking for clarification",
-                response.message,
+            return (
+                make_process_note(
+                    title=(
+                        "Stopping safely"
+                        if node_name != "ask_clarification"
+                        else "Asking for clarification"
+                    ),
+                    detail=response.message,
+                ),
+                [],
             )
 
-    return None
+    return None, []
+
+
+def process_event_for_node(node_name: str, update: dict) -> str | None:
+    note, sources = process_note_for_node(node_name, update)
+
+    if note is None:
+        return None
+
+    return stream_note(
+        note.title,
+        note.detail,
+        note.source_numbers,
+        sources,
+    )
 
 
 @app.post("/chat/stream")
@@ -217,13 +280,20 @@ def chat_stream(request: ChatRequest):
                 history=request.history,
             )
             final_response = None
+            live_process_notes = []
 
             for event in chat_graph.stream(state):
                 for node_name, update in event.items():
-                    process_event = process_event_for_node(node_name, update)
+                    note, note_sources = process_note_for_node(node_name, update)
 
-                    if process_event:
-                        yield process_event
+                    if note:
+                        live_process_notes.append(note)
+                        yield stream_note(
+                            note.title,
+                            note.detail,
+                            note.source_numbers,
+                            note_sources,
+                        )
 
                     if isinstance(update, dict) and update.get("response") is not None:
                         final_response = update["response"]
@@ -235,6 +305,9 @@ def chat_stream(request: ChatRequest):
                 time.perf_counter() - start_time,
                 2,
             )
+            if live_process_notes:
+                final_response.process_notes = live_process_notes
+
             yield sse_payload(
                 "final",
                 {
