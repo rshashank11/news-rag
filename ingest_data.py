@@ -11,13 +11,13 @@ from dotenv import load_dotenv
 from pinecone.grpc import PineconeGRPC as Pinecone
 from pinecone_text.sparse import BM25Encoder
 
-from app.openai_client import get_embedding_model, make_embedding_client
+from app.openai_client import get_embedding_model, make_sync_embedding_client
 from database import SessionLocal, engine, Base
 from models import StoryMetaData
 
 load_dotenv()
 
-client = make_embedding_client()
+client = make_sync_embedding_client()
 IST = ZoneInfo("Asia/Kolkata")
 
 Base.metadata.create_all(bind=engine)

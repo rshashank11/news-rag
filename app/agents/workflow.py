@@ -11,7 +11,13 @@ from app.agents.prompts import (
     CONTEXT_JUDGE_SYSTEM_PROMPT,
     QUERY_REWRITE_SYSTEM_PROMPT,
 )
-from app.openai_client import get_chat_model, make_chat_client
+from app.config import settings
+from app.openai_client import (
+    get_answer_model,
+    get_context_judge_model,
+    get_query_rewrite_model,
+    make_sync_chat_client,
+)
 from app.retrieval import retrieve_chunks
 from database import SessionLocal
 from models import StoryMetaData
@@ -29,17 +35,17 @@ from schemas import (
 )
 
 
-MAX_RETRIEVAL_ATTEMPTS = 2
-MAX_ANSWER_SOURCES = 6
-MAX_CONTEXT_CHARS_PER_SOURCE = 6000
-MAX_STORY_EXCERPT_CHARS = 5000
-MIN_TIMELINE_DATED_SOURCES = 2
-MIN_TIMELINE_RELEVANCE_SCORE = 5
-MIN_PARTIAL_BRIEFING_RELEVANCE_SCORE = 4
-MIN_NEGATIVE_LIST_RELEVANCE_SCORE = 3
+MAX_RETRIEVAL_ATTEMPTS = settings.max_retrieval_attempts
+MAX_ANSWER_SOURCES = settings.max_answer_sources
+MAX_CONTEXT_CHARS_PER_SOURCE = settings.max_context_chars_per_source
+MAX_STORY_EXCERPT_CHARS = settings.max_story_excerpt_chars
+MIN_TIMELINE_DATED_SOURCES = settings.min_timeline_dated_sources
+MIN_TIMELINE_RELEVANCE_SCORE = settings.min_timeline_relevance_score
+MIN_PARTIAL_BRIEFING_RELEVANCE_SCORE = settings.min_partial_briefing_relevance_score
+MIN_NEGATIVE_LIST_RELEVANCE_SCORE = settings.min_negative_list_relevance_score
 CITATION_PATTERN = re.compile(r"\[Source\s+(\d+)\]")
 
-client = make_chat_client()
+client = make_sync_chat_client()
 
 
 class ChatState(TypedDict):
@@ -99,26 +105,33 @@ def fetch_stories_by_id(story_ids: list[str]) -> dict[str, StoryMetaData]:
 
 
 def build_source_context(chunk: RetrievedChunk, story: StoryMetaData | None) -> str:
+    topics = story.topics if story and story.topics else chunk.topics
+    categories = story.categories if story and story.categories else chunk.categories
+    metadata_lines = []
+
+    if topics:
+        metadata_lines.append(f"Topics: {', '.join(topics)}")
+
+    if categories:
+        metadata_lines.append(f"Categories: {', '.join(categories)}")
+
+    context_parts = []
+
+    if metadata_lines:
+        context_parts.append("\n".join(metadata_lines))
+
+    context_parts.append(f"Matched paragraph: {chunk.chunk_text}")
+
     if story is None:
-        return chunk.chunk_text
+        return "\n\n".join(context_parts)
 
-    return "\n\n".join(
-        [
-            f"Matched paragraph: {chunk.chunk_text}",
-            f"Full story excerpt: {story.full_content[:MAX_STORY_EXCERPT_CHARS]}",
-        ]
-    )
+    context_parts.append(f"Full story excerpt: {story.full_content[:MAX_STORY_EXCERPT_CHARS]}")
+    return "\n\n".join(context_parts)
 
 
-def build_sources_from_chunks(chunks: list[RetrievedChunk]) -> list[NewsSource]:
-    sources = []
+def top_unique_story_chunks(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
     seen_story_ids = set()
-    story_ids = [
-        chunk.story_id
-        for chunk in chunks
-        if chunk.story_id
-    ]
-    stories_by_id = fetch_stories_by_id(story_ids)
+    unique_story_chunks = []
 
     for chunk in chunks:
         dedupe_key = chunk.story_id or chunk.id
@@ -127,6 +140,54 @@ def build_sources_from_chunks(chunks: list[RetrievedChunk]) -> list[NewsSource]:
             continue
 
         seen_story_ids.add(dedupe_key)
+        unique_story_chunks.append(chunk)
+
+    return unique_story_chunks
+
+
+def source_selection_detail(chunks: list[RetrievedChunk]) -> str:
+    unique_story_chunks = top_unique_story_chunks(chunks)
+
+    if not unique_story_chunks:
+        return ""
+
+    debug_chunks = unique_story_chunks[:settings.rerank_debug_story_count]
+    top_story_text = "; ".join(
+        (
+            f"{chunk.headline}"
+            f" (rerank={chunk.rerank_score:.2f})"
+            if chunk.rerank_score is not None
+            else chunk.headline
+        )
+        for chunk in debug_chunks
+    )
+    detail = f" Top reranked stories: {top_story_text}."
+
+    if len(unique_story_chunks) > MAX_ANSWER_SOURCES:
+        dropped_chunk = unique_story_chunks[MAX_ANSWER_SOURCES]
+        dropped_score = (
+            f" rerank={dropped_chunk.rerank_score:.2f}"
+            if dropped_chunk.rerank_score is not None
+            else ""
+        )
+        detail += (
+            " First story after the source cap: "
+            f"{dropped_chunk.headline}{dropped_score}."
+        )
+
+    return detail[:450]
+
+
+def build_sources_from_chunks(chunks: list[RetrievedChunk]) -> list[NewsSource]:
+    sources = []
+    story_ids = [
+        chunk.story_id
+        for chunk in chunks
+        if chunk.story_id
+    ]
+    stories_by_id = fetch_stories_by_id(story_ids)
+
+    for chunk in top_unique_story_chunks(chunks):
         story = stories_by_id.get(chunk.story_id or "")
 
         sources.append(
@@ -614,6 +675,7 @@ def retrieve(state: ChatState):
     date_detail = ""
     if analysis.from_date or analysis.to_date:
         date_detail = f" Date filter: {analysis.from_date or 'any'} to {analysis.to_date or 'any'}."
+    selection_detail = source_selection_detail(chunks)
 
     return {
         "chunks": chunks,
@@ -624,8 +686,10 @@ def retrieve(state: ChatState):
             TraceStep(
                 name="Retrieved sources",
                 detail=(
-                    f"Attempt {state['attempts'] + 1}: hybrid search returned "
-                    f"{len(chunks)} chunk(s) and {len(sources)} source(s).{date_detail}"
+                    f"Attempt {state['attempts'] + 1}: reranked candidate pool up to "
+                    f"{settings.rerank_candidate_top_k} Pinecone chunk(s), selected "
+                    f"{len(chunks)} chunk(s) and {len(sources)} source(s)."
+                    f"{date_detail}{selection_detail}"
                 ),
             )
         ],
@@ -648,7 +712,7 @@ def check_context(state: ChatState):
 
     try:
         response = client.responses.parse(
-            model=get_chat_model(),
+            model=get_context_judge_model(),
             input=[
                 {
                     "role": "system",
@@ -792,7 +856,7 @@ def rewrite_query(state: ChatState):
     else:
         try:
             response = client.responses.parse(
-                model=get_chat_model(),
+                model=get_query_rewrite_model(),
                 input=[
                     {
                         "role": "system",
@@ -834,7 +898,7 @@ def answer(state: ChatState):
 
     try:
         response = client.responses.parse(
-            model=get_chat_model(),
+            model=get_answer_model(),
             input=[
                 {
                     "role": "system",

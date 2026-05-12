@@ -1,18 +1,17 @@
 import calendar
+import openai
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from app.agents.prompts import PLANNER_SYSTEM_PROMPT
-from app.openai_client import get_chat_model, make_chat_client
+from app.config import settings
+from app.openai_client import get_planner_model, make_sync_chat_client
 from schemas import ChatMessage, QueryAnalysis, clean_text
 
 
-client = make_chat_client()
+client = make_sync_chat_client()
 
 APP_TIMEZONE = ZoneInfo("Asia/Kolkata")
-DEFAULT_K = 10
-MAX_HISTORY_MESSAGES = 8
-MAX_HISTORY_CHARS = 6000
 FOLLOW_UP_REFERENCE_PHRASES = [
     "this",
     "that",
@@ -37,7 +36,7 @@ def clarification_analysis(question: str, message: str) -> QueryAnalysis:
         intent="clarify",
         search_query=clean_text(question)[:300] or "clarification needed",
         entities=[],
-        k=DEFAULT_K,
+        k=settings.default_query_k,
         clarification_needed=True,
         clarification_question=message,
         from_date=None,
@@ -51,7 +50,7 @@ def out_of_scope_analysis(question: str, message: str) -> QueryAnalysis:
         intent="out_of_scope",
         search_query=clean_text(question)[:300] or "out of scope",
         entities=[],
-        k=DEFAULT_K,
+        k=settings.default_query_k,
         clarification_needed=False,
         clarification_question=None,
         from_date=None,
@@ -67,11 +66,11 @@ def format_history_for_planner(history: list[ChatMessage]) -> str:
     lines = []
     total_chars = 0
 
-    for message in history[-MAX_HISTORY_MESSAGES:]:
+    for message in history[-settings.max_history_messages:]:
         line = f"{message.role}: {clean_text(message.content)}"
         total_chars += len(line)
 
-        if total_chars > MAX_HISTORY_CHARS:
+        if total_chars > settings.max_history_chars:
             break
 
         lines.append(line)
@@ -125,7 +124,7 @@ def recover_follow_up_analysis(
         intent="answer",
         search_query=search_query,
         entities=[],
-        k=80,
+        k=settings.follow_up_query_k,
         clarification_needed=False,
         clarification_question=None,
         from_date=from_date,
@@ -151,7 +150,7 @@ def analyze_question(
         today = datetime.now(APP_TIMEZONE).date()
         current_date = today.isoformat()
         response = client.responses.parse(
-            model=get_chat_model(),
+            model=get_planner_model(),
             input=[
                 {
                     "role": "system",
@@ -198,18 +197,22 @@ def analyze_question(
 
         return analysis
 
+    except openai.BadRequestError as exc:
+        return out_of_scope_analysis(
+            cleaned_question,
+            (
+                "I cannot help with requests to bypass instructions, ignore "
+                "source grounding, or override the chatbot's guardrails."
+            ),
+        )
+    except openai.APIError as exc:
+        return clarification_analysis(
+            cleaned_question,
+            (
+                "I am having trouble reaching the AI services right now. Please try again in a moment."
+            ),
+        )
     except Exception as exc:
-        print(f"OpenAI query planning failed: {exc}")
-        error_text = str(exc).lower()
-        if "content_filter" in error_text or "jailbreak" in error_text:
-            return out_of_scope_analysis(
-                cleaned_question,
-                (
-                    "I cannot help with requests to bypass instructions, ignore "
-                    "source grounding, or override the chatbot's guardrails."
-                ),
-            )
-
         return clarification_analysis(
             cleaned_question,
             (

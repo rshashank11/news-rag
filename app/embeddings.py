@@ -1,7 +1,7 @@
-from app.openai_client import get_embedding_model, make_embedding_client
+from app.openai_client import get_embedding_model, make_sync_embedding_client
 
 
-client = make_embedding_client()
+client = make_sync_embedding_client()
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
