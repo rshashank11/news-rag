@@ -1,27 +1,79 @@
-import os
-
 from dotenv import load_dotenv
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy import create_engine
-from sqlalchemy.orm import DeclarativeBase, sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.config import settings
 
 load_dotenv()
 
-POSTGRESQL_URL = os.environ.get("POSTGRESQL_URL")
+_async_engine = None
+_async_sessionmaker: async_sessionmaker[AsyncSession] | None = None
 
-if not POSTGRESQL_URL:
-    raise RuntimeError("POSTGRESQL_URL is missing from .env")
+
+def to_asyncpg_url(database_url: str) -> str:
+    if database_url.startswith("postgresql+asyncpg://"):
+        return database_url
+
+    if database_url.startswith("postgresql+psycopg2://"):
+        return database_url.replace("postgresql+psycopg2://", "postgresql+asyncpg://", 1)
+
+    if database_url.startswith("postgresql://"):
+        return database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+    return database_url
+
+
+def to_sync_url(database_url: str) -> str:
+    if database_url.startswith("postgresql+asyncpg://"):
+        return database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+
+    return database_url
+
+
+def get_async_engine():
+    global _async_engine
+
+    if _async_engine is None:
+        _async_engine = create_async_engine(
+            to_asyncpg_url(settings.postgresql_url),
+            pool_pre_ping=True,
+        )
+
+    return _async_engine
+
+
+def get_async_sessionmaker() -> async_sessionmaker[AsyncSession]:
+    global _async_sessionmaker
+
+    if _async_sessionmaker is None:
+        _async_sessionmaker = async_sessionmaker(
+            bind=get_async_engine(),
+            class_=AsyncSession,
+            autoflush=False,
+            expire_on_commit=False,
+        )
+
+    return _async_sessionmaker
+
+
+def AsyncSessionLocal() -> AsyncSession:
+    return get_async_sessionmaker()()
+
 
 engine = create_engine(
-    POSTGRESQL_URL,
-    # checks whether the database connection is alive before using it
-    pool_pre_ping=True
+    to_sync_url(settings.postgresql_url),
+    pool_pre_ping=True,
 )
 
 SessionLocal = sessionmaker(
     bind=engine,
+    class_=Session,
     autoflush=False,
-    autocommit=False
+    autocommit=False,
 )
+
 
 class Base(DeclarativeBase):
     pass

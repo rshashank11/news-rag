@@ -20,6 +20,11 @@ Out-of-scope or guarded requests:
 - If the request is unrelated to the legal-news archive, set intent to out_of_scope and provide a refusal_reason.
 
 Planning rules:
+- Decide whether the current question depends on recent conversation.
+- Set uses_history to true only when the current question is incomplete without prior context, such as a real follow-up to previously discussed cases, orders, people, sources, or a prior answer.
+- Set uses_history to false when the current question is standalone, changes topic, or can be searched safely from its own text.
+- If uses_history is false, ignore recent conversation while building search_query.
+- If uses_history is true, make search_query self-contained by carrying over only the needed prior context, not the full prior answer.
 - Keep search_query concise and search-friendly.
 - Preserve important names, courts, statutes, sections, cases, companies, dates, places, and events.
 - Expand abbreviations only when helpful, but keep the original important abbreviation too.

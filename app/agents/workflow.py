@@ -48,6 +48,22 @@ CITATION_PATTERN = re.compile(r"\[Source\s+(\d+)\]")
 client = make_sync_chat_client()
 
 
+def truncate_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+
+    suffix = " ... [truncated]"
+    return f"{text[:max_chars - len(suffix)].rstrip()}{suffix}"
+
+
+def process_note_detail(text: str) -> str:
+    return truncate_text(text, 700)
+
+
+def trace_detail(text: str) -> str:
+    return truncate_text(text, 1000)
+
+
 class ChatState(TypedDict):
     question: str
     history: list[ChatMessage]
@@ -544,7 +560,9 @@ def build_process_notes(
         notes.append(
             ProcessNote(
                 title="Stopping safely",
-                detail=reason or "The request was outside the legal-news story data.",
+                detail=process_note_detail(
+                    reason or "The request was outside the legal-news story data."
+                ),
             )
         )
     elif response_type == "clarification_needed":
@@ -561,7 +579,7 @@ def build_process_notes(
         notes.append(
             ProcessNote(
                 title="Stopping safely",
-                detail=(
+                detail=process_note_detail(
                     reason
                     or "The indexed news stories did not provide enough support for a confident answer."
                 ),
@@ -588,8 +606,9 @@ def plan_query(state: ChatState):
         "steps": [
             TraceStep(
                 name="Parsed query",
-                detail=(
+                detail=trace_detail(
                     f"Intent: {analysis.intent}; "
+                    f"history: {'used' if analysis.uses_history else 'not used'}; "
                     f"search query: {analysis.search_query}"
                 ),
             )
@@ -809,7 +828,7 @@ def check_context(state: ChatState):
             + [
                 TraceStep(
                     name="Judged context",
-                    detail=(
+                    detail=trace_detail(
                         f"Score {assessment.relevance_score}/10. "
                         f"{assessment.reason}{scope_note}{timeline_note}"
                         f"{partial_briefing_note}{negative_list_note}"
@@ -826,7 +845,7 @@ def check_context(state: ChatState):
             + [
                 TraceStep(
                     name="Judged context",
-                    detail=(
+                    detail=trace_detail(
                         f"Context judge failed: {exc}. "
                         "Marked context as insufficient."
                     ),
@@ -879,14 +898,21 @@ def rewrite_query(state: ChatState):
 
         except Exception as exc:
             rewritten_query = " ".join([state["question"], *analysis.entities]).strip()
-            reason = f"Rewrite failed: {exc}. Used question plus detected entities."
+            reason = trace_detail(
+                f"Rewrite failed: {exc}. Used question plus detected entities."
+            )
 
     return {
         "current_query": rewritten_query,
         "context_enough": False,
         "suggested_query": None,
         "steps": state.get("steps", [])
-        + [TraceStep(name="Rewrote query", detail=f"{reason} Query: {rewritten_query}")],
+        + [
+            TraceStep(
+                name="Rewrote query",
+                detail=trace_detail(f"{reason} Query: {rewritten_query}"),
+            )
+        ],
     }
 
 
@@ -950,13 +976,16 @@ def answer(state: ChatState):
     except Exception as exc:
         return limited_answer_with_reason(
             state,
-            f"Answer generation failed: {exc}",
+            trace_detail(f"Answer generation failed: {exc}"),
         )
 
 
 def limited_answer_with_reason(state: ChatState, reason: str):
     analysis = require_analysis(state)
-    steps = state.get("steps", []) + [TraceStep(name="Stopped safely", detail=reason)]
+    safe_reason = trace_detail(reason)
+    steps = state.get("steps", []) + [
+        TraceStep(name="Stopped safely", detail=safe_reason)
+    ]
 
     return {
         "response": ChatResponse(
@@ -972,7 +1001,7 @@ def limited_answer_with_reason(state: ChatState, reason: str):
                 sources=state.get("sources", []),
                 steps=steps,
                 response_type="limited_answer",
-                reason=reason,
+                reason=safe_reason,
             ),
         )
     }

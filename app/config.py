@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     follow_up_query_k: int = 80
     max_history_messages: int = 8
     max_history_chars: int = 6000
+    max_history_message_chars: int = 1200
 
     # Workflow configuration thresholds
     max_retrieval_attempts: int = 2

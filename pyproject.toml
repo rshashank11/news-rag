@@ -22,6 +22,7 @@ dependencies = [
     "requests>=2.32.0",
     "pinecone>=9.0.0",
     "pinecone-text>=0.10.0",
+    "asyncpg>=0.31.0",
 ]
 
 [build-system]

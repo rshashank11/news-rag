@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Any
 
 from pinecone.grpc import PineconeGRPC as Pinecone
 
@@ -44,7 +45,7 @@ def hybrid_query(
     top_k: int | None = None,
     alpha: float | None = None,
     metadata_filter: dict | None = None,
-):
+) -> Any:
     dense_weight, sparse_weight = get_hybrid_weights(alpha)
     query_kwargs = {
         "vector": scale_dense_vector(dense_vector, dense_weight),

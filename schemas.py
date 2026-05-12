@@ -17,7 +17,7 @@ class StrictBaseModel(BaseModel):
 
 class ChatMessage(StrictBaseModel):
     role: Literal["user", "assistant"]
-    content: str = Field(min_length=1, max_length=4000)
+    content: str = Field(min_length=1, max_length=8000)
 
     @field_validator("content")
     @classmethod
@@ -46,6 +46,7 @@ class QueryAnalysis(StrictBaseModel):
     search_query: str = Field(min_length=1, max_length=300)
     entities: list[str] = Field(default_factory=list, max_length=20)
     k: int = Field(default=10, ge=3, le=80)
+    uses_history: bool = False
     clarification_needed: bool = False
     clarification_question: str | None = Field(default=None, max_length=300)
     from_date: str | None = None
