@@ -1,5 +1,4 @@
 import re
-import uuid
 from typing import Literal
 
 from langgraph.graph import END, START, StateGraph
@@ -19,8 +18,6 @@ from app.openai_client import (
     make_sync_chat_client,
 )
 from app.retrieval import retrieve_chunks
-from database import SessionLocal
-from models import StoryMetaData
 from schemas import (
     ChatResponse,
     ChatMessage,
@@ -39,6 +36,7 @@ MAX_RETRIEVAL_ATTEMPTS = settings.max_retrieval_attempts
 MAX_ANSWER_SOURCES = settings.max_answer_sources
 MAX_CONTEXT_CHARS_PER_SOURCE = settings.max_context_chars_per_source
 MAX_STORY_EXCERPT_CHARS = settings.max_story_excerpt_chars
+SAKAL_CHUNK_OVERLAP_WORDS = 50
 MIN_TIMELINE_DATED_SOURCES = settings.min_timeline_dated_sources
 MIN_TIMELINE_RELEVANCE_SCORE = settings.min_timeline_relevance_score
 MIN_PARTIAL_BRIEFING_RELEVANCE_SCORE = settings.min_partial_briefing_relevance_score
@@ -46,6 +44,16 @@ MIN_NEGATIVE_LIST_RELEVANCE_SCORE = settings.min_negative_list_relevance_score
 CITATION_PATTERN = re.compile(r"\[Source\s+(\d+)\]")
 
 client = make_sync_chat_client()
+
+
+def display_source_name(source: str | None) -> str:
+    if source == "barandbench":
+        return "Bar & Bench"
+
+    if source == "sakal":
+        return "Sakal"
+
+    return "selected"
 
 
 def truncate_text(text: str, max_chars: int) -> str:
@@ -66,6 +74,7 @@ def trace_detail(text: str) -> str:
 
 class ChatState(TypedDict):
     question: str
+    source: str
     history: list[ChatMessage]
     analysis: QueryAnalysis | None
     current_query: str | None
@@ -85,44 +94,35 @@ def require_analysis(state: ChatState) -> QueryAnalysis:
     return analysis
 
 
-def format_story_date(story: StoryMetaData) -> str | None:
-    if story.published_at is None:
-        return None
+def merge_consecutive_chunk_texts(chunks: list[RetrievedChunk]) -> str:
+    ordered_chunks = sorted(
+        chunks,
+        key=lambda chunk: chunk.chunk_index if chunk.chunk_index is not None else 0,
+    )
+    merged_words = []
+    previous_chunk_index = None
 
-    return story.published_at.date().isoformat()
+    for chunk in ordered_chunks:
+        chunk_words = chunk.chunk_text.split()
 
+        if (
+            previous_chunk_index is not None
+            and chunk.chunk_index == previous_chunk_index + 1
+        ):
+            chunk_words = chunk_words[SAKAL_CHUNK_OVERLAP_WORDS:]
 
-def fetch_stories_by_id(story_ids: list[str]) -> dict[str, StoryMetaData]:
-    parsed_story_ids = []
+        merged_words.extend(chunk_words)
+        previous_chunk_index = chunk.chunk_index
 
-    for story_id in story_ids:
-        try:
-            parsed_story_ids.append(uuid.UUID(story_id))
-        except (TypeError, ValueError):
-            continue
-
-    if not parsed_story_ids:
-        return {}
-
-    db = SessionLocal()
-
-    try:
-        stories = (
-            db.query(StoryMetaData)
-            .filter(StoryMetaData.id.in_(parsed_story_ids))
-            .all()
-        )
-        return {
-            str(story.id): story
-            for story in stories
-        }
-    finally:
-        db.close()
+    return " ".join(merged_words)
 
 
-def build_source_context(chunk: RetrievedChunk, story: StoryMetaData | None) -> str:
-    topics = story.topics if story and story.topics else chunk.topics
-    categories = story.categories if story and story.categories else chunk.categories
+def build_combined_source_context(
+    story_chunks: list[RetrievedChunk],
+) -> str:
+    best_chunk = story_chunks[0]
+    topics = best_chunk.topics
+    categories = best_chunk.categories
     metadata_lines = []
 
     if topics:
@@ -136,12 +136,7 @@ def build_source_context(chunk: RetrievedChunk, story: StoryMetaData | None) -> 
     if metadata_lines:
         context_parts.append("\n".join(metadata_lines))
 
-    context_parts.append(f"Matched paragraph: {chunk.chunk_text}")
-
-    if story is None:
-        return "\n\n".join(context_parts)
-
-    context_parts.append(f"Full story excerpt: {story.full_content[:MAX_STORY_EXCERPT_CHARS]}")
+    context_parts.append(f"Matched article context: {merge_consecutive_chunk_texts(story_chunks)}")
     return "\n\n".join(context_parts)
 
 
@@ -194,24 +189,28 @@ def source_selection_detail(chunks: list[RetrievedChunk]) -> str:
     return detail[:450]
 
 
+def group_chunks_by_story(chunks: list[RetrievedChunk]) -> dict[str, list[RetrievedChunk]]:
+    grouped_chunks: dict[str, list[RetrievedChunk]] = {}
+
+    for chunk in chunks:
+        grouped_chunks.setdefault(chunk.story_id or chunk.id, []).append(chunk)
+
+    return grouped_chunks
+
+
 def build_sources_from_chunks(chunks: list[RetrievedChunk]) -> list[NewsSource]:
     sources = []
-    story_ids = [
-        chunk.story_id
-        for chunk in chunks
-        if chunk.story_id
-    ]
-    stories_by_id = fetch_stories_by_id(story_ids)
+    chunks_by_story = group_chunks_by_story(chunks)
 
     for chunk in top_unique_story_chunks(chunks):
-        story = stories_by_id.get(chunk.story_id or "")
+        story_chunks = chunks_by_story.get(chunk.story_id or chunk.id, [chunk])
 
         sources.append(
             NewsSource(
                 source_number=len(sources) + 1,
-                headline=story.headline if story else chunk.headline,
-                published_at=format_story_date(story) if story else chunk.published_at,
-                match_snippet=build_source_context(chunk, story),
+                headline=chunk.headline,
+                published_at=chunk.published_at,
+                match_snippet=build_combined_source_context(story_chunks),
             )
         )
 
@@ -468,15 +467,17 @@ def build_process_notes(
     sources: list[NewsSource],
     steps: list[TraceStep],
     response_type: str,
+    source: str,
     reason: str | None = None,
 ) -> list[ProcessNote]:
     topic = describe_topic(analysis)
+    source_name = display_source_name(source)
     notes = [
         ProcessNote(
             title="Planning the answer",
             detail=(
                 f"I treated this as a request to {describe_intent(analysis)} "
-                f"using Bar & Bench stories about {topic}."
+                f"using {source_name} news stories about {topic}."
             ),
         )
     ]
@@ -561,7 +562,7 @@ def build_process_notes(
             ProcessNote(
                 title="Stopping safely",
                 detail=process_note_detail(
-                    reason or "The request was outside the legal-news story data."
+                    reason or f"The request was outside the {source_name} news story data."
                 ),
             )
         )
@@ -571,7 +572,7 @@ def build_process_notes(
                 title="Asking for a sharper question",
                 detail=(
                     "The request was too broad to ground safely, so I asked for "
-                    "a case, court, person, organization, topic, or time period."
+                    "a story, person, organization, location, topic, or time period."
                 ),
             )
         )
@@ -633,7 +634,8 @@ def route_after_planning(
 def out_of_scope(state: ChatState):
     analysis = require_analysis(state)
     message = analysis.refusal_reason or (
-        "This assistant can only answer questions about indexed legal-news stories."
+        f"This assistant can only answer questions about indexed "
+        f"{display_source_name(state['source'])} news stories."
     )
     steps = state.get("steps", []) + [TraceStep(name="Stopped request", detail=message)]
 
@@ -647,6 +649,7 @@ def out_of_scope(state: ChatState):
                 sources=[],
                 steps=steps,
                 response_type="out_of_scope",
+                source=state["source"],
                 reason=message,
             ),
         )
@@ -670,6 +673,7 @@ def ask_clarification(state: ChatState):
                 sources=[],
                 steps=steps,
                 response_type="clarification_needed",
+                source=state["source"],
                 reason=message,
             ),
         )
@@ -685,6 +689,7 @@ def retrieve(state: ChatState):
         top_k=analysis.k,
         from_date=analysis.from_date,
         to_date=analysis.to_date,
+        source=state["source"],
     )
     sources = order_sources_for_intent(
         build_sources_from_chunks(chunks),
@@ -969,6 +974,7 @@ def answer(state: ChatState):
                     sources=cited_sources,
                     steps=steps,
                     response_type="answer",
+                    source=state["source"],
                 ),
             )
         }
@@ -1001,6 +1007,7 @@ def limited_answer_with_reason(state: ChatState, reason: str):
                 sources=state.get("sources", []),
                 steps=steps,
                 response_type="limited_answer",
+                source=state["source"],
                 reason=safe_reason,
             ),
         )

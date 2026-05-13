@@ -20,7 +20,17 @@ class Settings(BaseSettings):
     pinecone_index_host: str
     pinecone_namespace: str = "default"
 
-    bm25_encoder_path: str = "bm25_values.json"
+    bm25_encoder_path: str = "bm25_sakal_values.json"
+    default_news_source: str = "sakal"
+
+    barandbench_pinecone_index_host: str = ""
+    barandbench_pinecone_namespace: str = "barandbench"
+    barandbench_bm25_encoder_path: str = "bm25_values.json"
+
+    sakal_pinecone_index_name: str = "sakal"
+    sakal_pinecone_index_host: str = ""
+    sakal_pinecone_namespace: str = "sakal_v1"
+    sakal_bm25_encoder_path: str = "bm25_sakal_values.json"
 
     retrieval_top_k: int = 10
     min_retrieval_top_k: int = 1
@@ -58,6 +68,28 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    def news_source_config(self, source: str | None = None) -> dict[str, str]:
+        selected_source = (source or self.default_news_source).strip().lower()
+
+        if selected_source == "barandbench":
+            return {
+                "source": "barandbench",
+                "pinecone_index_host": self.barandbench_pinecone_index_host or self.pinecone_index_host,
+                "pinecone_namespace": self.barandbench_pinecone_namespace,
+                "bm25_encoder_path": self.barandbench_bm25_encoder_path,
+            }
+
+        if selected_source == "sakal":
+            return {
+                "source": "sakal",
+                "pinecone_index_name": self.sakal_pinecone_index_name,
+                "pinecone_index_host": self.sakal_pinecone_index_host,
+                "pinecone_namespace": self.sakal_pinecone_namespace,
+                "bm25_encoder_path": self.sakal_bm25_encoder_path,
+            }
+
+        raise ValueError(f"Unsupported news source: {source}")
 
 
 settings = Settings()

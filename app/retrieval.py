@@ -8,7 +8,7 @@ from app.vectorstore import hybrid_query
 from schemas import RetrievedChunk, clean_text
 
 
-TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
+TOKEN_PATTERN = re.compile(r"\w+", re.UNICODE)
 STOPWORDS = {
     "about",
     "after",
@@ -72,6 +72,7 @@ def iso_date_to_yyyymmdd(value: str | None) -> int | None:
 def build_pinecone_date_filter(
     from_date: str | None = None,
     to_date: str | None = None,
+    source: str | None = None,
 ) -> dict | None:
     date_filter = {}
 
@@ -87,7 +88,14 @@ def build_pinecone_date_filter(
     if not date_filter:
         return None
 
-    return {"published_at_yyyymmdd": date_filter}
+    source_name = settings.news_source_config(source)["source"]
+    date_field = (
+        "published_at_yyyymmdd"
+        if source_name == "barandbench"
+        else "date_published_yyyymmdd"
+    )
+
+    return {date_field: date_filter}
 
 
 def get_match_value(match, name: str, default=None):
@@ -160,21 +168,44 @@ def document_matches_date_filter(
     return True
 
 
-def format_match(match) -> RetrievedChunk | None:
+def metadata_categories_for_source(metadata: dict, source: str | None) -> list[str]:
+    source_name = settings.news_source_config(source)["source"]
+
+    if source_name == "barandbench":
+        return list_metadata_values(metadata.get("categories"))
+
+    return list_metadata_values([
+        metadata.get("edition"),
+        metadata.get("source"),
+        metadata.get("location"),
+    ])
+
+
+def format_match(match, source: str | None = None) -> RetrievedChunk | None:
     metadata = get_match_metadata(match)
     chunk_text = metadata.get("chunk_text")
+    source_name = settings.news_source_config(source)["source"]
 
     if not chunk_text:
         return None
 
+    if source_name == "barandbench":
+        story_id = metadata.get("story_id")
+        published_at = metadata.get("published_at")
+        topics = list_metadata_values(metadata.get("topics"))
+    else:
+        story_id = metadata.get("article_id")
+        published_at = metadata.get("date_published")
+        topics = list_metadata_values(metadata.get("keywords"))
+
     return RetrievedChunk(
         id=str(get_match_value(match, "id", "")),
-        story_id=metadata.get("story_id"),
+        story_id=story_id,
         chunk_index=metadata.get("chunk_index"),
         headline=metadata.get("headline") or "Untitled",
-        published_at=metadata.get("published_at"),
-        topics=list_metadata_values(metadata.get("topics")),
-        categories=list_metadata_values(metadata.get("categories")),
+        published_at=published_at,
+        topics=topics,
+        categories=metadata_categories_for_source(metadata, source),
         retrieval_score=get_match_score(match),
         chunk_text=chunk_text,
     )
@@ -360,6 +391,7 @@ def retrieve_chunks(
     top_k: int | None = None,
     from_date: str | None = None,
     to_date: str | None = None,
+    source: str | None = None,
 ) -> list[RetrievedChunk]:
     cleaned_query = clean_text(query)
 
@@ -369,8 +401,8 @@ def retrieve_chunks(
     search_top_k = clamp_top_k(top_k)
     candidate_top_k = clamp_top_k(max(search_top_k, settings.rerank_candidate_top_k))
     dense_vector = embed_text(cleaned_query)
-    sparse_vector = encode_sparse_query(cleaned_query)
-    date_filter = build_pinecone_date_filter(from_date, to_date)
+    sparse_vector = encode_sparse_query(cleaned_query, source=source)
+    date_filter = build_pinecone_date_filter(from_date, to_date, source=source)
     metadata_filter = date_filter
 
     response = hybrid_query(
@@ -378,12 +410,13 @@ def retrieve_chunks(
         sparse_vector=sparse_vector,
         top_k=candidate_top_k,
         metadata_filter=metadata_filter,
+        source=source,
     )
 
     chunks = []
 
     for match in get_match_value(response, "matches", []) or []:
-        chunk = format_match(match)
+        chunk = format_match(match, source=source)
         if chunk is None:
             continue
 
@@ -395,17 +428,18 @@ def retrieve_chunks(
     if chunks or metadata_filter is None:
         return chunks[:search_top_k]
 
-    # Older Pinecone records may only have the old metadata fields.
-    # Fall back to a wider unfiltered search, then apply the same date check in Python.
+    # If Pinecone returns no filtered matches, run one wider search and apply the
+    # same date check in Python. This helps while a namespace is still being rebuilt.
     fallback_response = hybrid_query(
         dense_vector=dense_vector,
         sparse_vector=sparse_vector,
         top_k=max(candidate_top_k, settings.date_fallback_top_k),
+        source=source,
     )
     fallback_chunks = []
 
     for match in get_match_value(fallback_response, "matches", []) or []:
-        chunk = format_match(match)
+        chunk = format_match(match, source=source)
         if chunk is None:
             continue
 

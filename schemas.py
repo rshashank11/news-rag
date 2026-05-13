@@ -30,6 +30,7 @@ class ChatMessage(StrictBaseModel):
 
 class ChatRequest(StrictBaseModel):
     question: str = Field(min_length=2, max_length=1000)
+    source: Literal["sakal", "barandbench"] = "sakal"
     history: list[ChatMessage] = Field(default_factory=list, max_length=20)
 
     @field_validator("question")

@@ -20,9 +20,14 @@ from schemas import (
 app = FastAPI(title="News Chatbot API")
 
 
-def build_initial_state(question: str, history: list[ChatMessage]) -> dict:
+def build_initial_state(
+    question: str,
+    history: list[ChatMessage],
+    source: str,
+) -> dict:
     return {
         "question": question,
+        "source": source,
         "history": history,
         "analysis": None,
         "current_query": None,
@@ -76,6 +81,7 @@ def chat(request: ChatRequest):
             build_initial_state(
                 question=request.question,
                 history=request.history,
+                source=request.source,
             )
         )
         response = result.get("response")
@@ -177,7 +183,7 @@ def process_note_for_node(
                 title="Planning the answer",
                 detail=(
                     f"I treated this as a request to {describe_intent(analysis)} "
-                    f"using Bar & Bench news stories about {describe_topic(analysis)}."
+                    f"using the selected news source about {describe_topic(analysis)}."
                 ),
             ),
             [],
@@ -278,6 +284,7 @@ def chat_stream(request: ChatRequest):
             state = build_initial_state(
                 question=request.question,
                 history=request.history,
+                source=request.source,
             )
             final_response = None
             live_process_notes = []

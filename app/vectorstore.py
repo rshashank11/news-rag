@@ -33,10 +33,15 @@ def get_hybrid_weights(alpha: float | None = None) -> tuple[float, float]:
     return dense_weight, sparse_weight
 
 
-@lru_cache(maxsize=1)
-def get_index():
+@lru_cache(maxsize=4)
+def get_index(source: str | None = None):
+    source_config = settings.news_source_config(source)
     pc = Pinecone(api_key=settings.pinecone_api_key)
-    return pc.Index(host=settings.pinecone_index_host)
+
+    if source_config.get("pinecone_index_host"):
+        return pc.Index(host=source_config["pinecone_index_host"])
+
+    return pc.Index(source_config["pinecone_index_name"])
 
 
 def hybrid_query(
@@ -45,17 +50,19 @@ def hybrid_query(
     top_k: int | None = None,
     alpha: float | None = None,
     metadata_filter: dict | None = None,
+    source: str | None = None,
 ) -> Any:
+    source_config = settings.news_source_config(source)
     dense_weight, sparse_weight = get_hybrid_weights(alpha)
     query_kwargs = {
         "vector": scale_dense_vector(dense_vector, dense_weight),
         "sparse_vector": scale_sparse_vector(sparse_vector, sparse_weight),
         "top_k": top_k or settings.retrieval_top_k,
-        "namespace": settings.pinecone_namespace,
+        "namespace": source_config["pinecone_namespace"],
         "include_metadata": True,
     }
 
     if metadata_filter is not None:
         query_kwargs["filter"] = metadata_filter
 
-    return get_index().query(**query_kwargs)
+    return get_index(source_config["source"]).query(**query_kwargs)

@@ -12,31 +12,28 @@ class RetrievalRerankingTests(unittest.TestCase):
             RetrievedChunk(
                 id="less-specific-1",
                 story_id="less-specific",
-                headline="Delhi High Court discusses bail in unrelated matter",
+                headline="शाळा उपक्रमाबाबत सामान्य बातमी",
                 published_at="2026-01-01",
-                chunk_text="The court discussed bail generally.",
+                chunk_text="शाळेतील कार्यक्रमाबाबत सामान्य माहिती देण्यात आली.",
                 retrieval_score=0.99,
             ),
             RetrievedChunk(
                 id="specific-1",
                 story_id="specific",
-                headline=(
-                    "Chargesheet should not be filed before completing probe to "
-                    "scuttle scope for default bail: Supreme Court"
-                ),
-                published_at="2023-04-26",
-                topics=["Default bail", "Supreme Court"],
-                categories=["Criminal Law"],
+                headline="पवित्र पोर्टलशिवाय शिक्षक भरतीला शासनाचा कडक चाप",
+                published_at="2026-04-01",
+                topics=["पवित्र", "पोर्टल", "शिक्षक भरती"],
+                categories=["Central_Desk", "cndsk"],
                 chunk_text=(
-                    "The Supreme Court explained when the right to default bail "
-                    "is affected by a late chargesheet."
+                    "पवित्र पोर्टलला बगल देत झालेल्या शिक्षक नियुक्त्यांचे "
+                    "ऑडिट करण्याचा निर्णय शासनाने घेतला."
                 ),
                 retrieval_score=0.60,
             ),
         ]
 
         ranked_chunks = rerank_chunks_by_story(
-            "Supreme Court position on default bail when chargesheet is filed late",
+            "पवित्र पोर्टल शिक्षक भरती",
             chunks,
         )
 
@@ -47,30 +44,30 @@ class RetrievalRerankingTests(unittest.TestCase):
             RetrievedChunk(
                 id="story-a-1",
                 story_id="story-a",
-                headline="Supreme Court default bail judgment",
+                headline="पवित्र पोर्टल शिक्षक भरती",
                 published_at="2024-01-01",
-                chunk_text="Default bail and chargesheet.",
+                chunk_text="शिक्षक भरती प्रक्रियेची चौकशी सुरू झाली.",
                 retrieval_score=0.90,
             ),
             RetrievedChunk(
                 id="story-a-2",
                 story_id="story-a",
-                headline="Supreme Court default bail judgment",
+                headline="पवित्र पोर्टल शिक्षक भरती",
                 published_at="2024-01-01",
-                chunk_text="Another matching paragraph on default bail.",
+                chunk_text="नियुक्त्यांचा तपशील शासनाला सादर केला जाणार आहे.",
                 retrieval_score=0.85,
             ),
             RetrievedChunk(
                 id="story-b-1",
                 story_id="story-b",
-                headline="Supreme Court default bail follow-up",
+                headline="शिक्षक नियुक्ती follow-up",
                 published_at="2024-01-02",
-                chunk_text="A separate story on default bail.",
+                chunk_text="शिक्षक भरतीबाबत स्वतंत्र बातमी.",
                 retrieval_score=0.70,
             ),
         ]
 
-        ranked_chunks = rerank_chunks_by_story("Supreme Court default bail", chunks)
+        ranked_chunks = rerank_chunks_by_story("पवित्र पोर्टल शिक्षक भरती", chunks)
 
         self.assertEqual(ranked_chunks[0].story_id, "story-a")
         self.assertEqual(ranked_chunks[1].story_id, "story-b")
@@ -78,16 +75,18 @@ class RetrievalRerankingTests(unittest.TestCase):
     def test_retrieve_overfetches_before_reranking(self) -> None:
         matches = [
             {
-                "id": "story-a-1",
+                "id": "ABD26N54468-0",
                 "score": 0.50,
                 "metadata": {
-                    "story_id": "story-a",
+                    "article_id": "ABD26N54468",
                     "chunk_index": 0,
-                    "headline": "Supreme Court default bail judgment",
-                    "published_at": "2024-01-01",
-                    "topics": ["Default bail"],
-                    "categories": ["Criminal Law"],
-                    "chunk_text": "Default bail and chargesheet.",
+                    "headline": "पवित्र पोर्टल शिक्षक भरती",
+                    "date_published": "2026-04-01",
+                    "keywords": ["पवित्र", "पोर्टल", "शिक्षक भरती"],
+                    "edition": "Central_Desk",
+                    "source": "cndsk",
+                    "location": "PNE",
+                    "chunk_text": "शिक्षक भरती प्रक्रियेची चौकशी सुरू झाली.",
                 },
             }
         ]
@@ -97,9 +96,13 @@ class RetrievalRerankingTests(unittest.TestCase):
             patch("app.retrieval.encode_sparse_query", return_value={"indices": [], "values": []}),
             patch("app.retrieval.hybrid_query", return_value={"matches": matches}) as hybrid_query,
         ):
-            chunks = retrieve_chunks("Supreme Court default bail", top_k=3)
+            chunks = retrieve_chunks("पवित्र पोर्टल शिक्षक भरती", top_k=3)
 
         self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0].story_id, "ABD26N54468")
+        self.assertEqual(chunks[0].published_at, "2026-04-01")
+        self.assertEqual(chunks[0].topics, ["पवित्र", "पोर्टल", "शिक्षक भरती"])
+        self.assertEqual(chunks[0].categories, ["Central_Desk", "cndsk", "PNE"])
         self.assertEqual(hybrid_query.call_args.kwargs["top_k"], settings.rerank_candidate_top_k)
 
 

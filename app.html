@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Bar & Bench AI</title>
+    <title>News Archive AI</title>
     <style>
         :root {
             --serif: Georgia, "Times New Roman", serif;
@@ -958,6 +958,39 @@
             box-shadow: none;
         }
 
+        .source-selector {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin: 0 0 18px;
+        }
+
+        .source-option {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            min-height: 38px;
+            padding: 8px 13px;
+            border: 1px solid #111111;
+            background: #fffaf5;
+            color: var(--ink);
+            font-size: 13px;
+            font-weight: 900;
+            cursor: pointer;
+        }
+
+        .source-option input {
+            position: absolute;
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .source-option:has(input:checked) {
+            background: var(--red);
+            color: #ffffff;
+        }
+
         textarea {
             min-height: 58px;
             max-height: 170px;
@@ -1193,7 +1226,7 @@
                     <div class="kicker">Editorial AI</div>
                     <h2 class="rail-title">News Chatbot</h2>
                     <p class="rail-copy">
-                        Ask about a case, court, judge, law firm, company, statute, or legal-news theme. The chatbot searches indexed Bar &amp; Bench news stories, checks whether the sources are strong enough, and answers only from the available reporting.
+                        Choose a news archive, ask a question, and the chatbot searches indexed stories, checks whether the sources are strong enough, and answers only from the available reporting.
                     </p>
                     <div class="archive-stat" aria-label="Archive statistics">
                         <div class="stat">
@@ -1236,13 +1269,23 @@
             <section class="chat-card" id="ask">
                 <div class="chat-head">
                     <div class="kicker">AI News Desk</div>
-                    <h1>Ask a question about Indian legal news.</h1>
+                    <h1>Ask a question across indexed news archives.</h1>
                     <p>
-                        The assistant searches Bar &amp; Bench news stories, reads the strongest matches, checks source support, and answers with citations from the reporting.
+                        Select Sakal or Bar &amp; Bench, then ask a question. The assistant reads the strongest matches, checks source support, and answers with citations from the reporting.
                     </p>
                 </div>
 
                 <form class="ask-form" id="questionForm">
+                    <div class="source-selector" aria-label="News source">
+                        <label class="source-option">
+                            <input type="radio" name="newsSource" value="sakal" checked>
+                            <span>Sakal</span>
+                        </label>
+                        <label class="source-option">
+                            <input type="radio" name="newsSource" value="barandbench">
+                            <span>Bar &amp; Bench</span>
+                        </label>
+                    </div>
                     <div class="ask-shell">
                         <textarea id="questionInput" maxlength="1000" rows="1" placeholder="Type here..."></textarea>
                         <button class="send-button" id="sendButton" type="submit" aria-label="Send">&uarr;</button>
@@ -1262,6 +1305,7 @@
         const sendButton = document.getElementById('sendButton');
         const errorBox = document.getElementById('errorBox');
         const chatStream = document.getElementById('chatStream');
+        const sourceInputs = Array.from(document.querySelectorAll('input[name="newsSource"]'));
 
         let currentRequestStartedAt = 0;
         let chatHistory = [];
@@ -1324,7 +1368,7 @@
                         <div class="process-icon">◆</div>
                         <div>
                             <div class="process-name">Starting the story search</div>
-                            <div class="process-detail">I am sending your question into the legal-news workflow.</div>
+                            <div class="process-detail">I am sending your question into the selected news workflow.</div>
                         </div>
                     </div>
                 </div>
@@ -1343,6 +1387,7 @@
             currentRequestStartedAt = performance.now();
 
             const requestHistory = chatHistory.slice(-MAX_HISTORY_MESSAGES);
+            const source = selectedSource();
             chatHistory.push({ role: 'user', content: question });
             trimHistory();
 
@@ -1350,7 +1395,7 @@
                 const response = await fetch('/chat/stream', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ question, history: requestHistory })
+                    body: JSON.stringify({ question, source, history: requestHistory })
                 });
 
                 if (!response.ok) {
@@ -1369,6 +1414,16 @@
                 setLoading(false);
             }
         }
+
+        function selectedSource() {
+            return sourceInputs.find(input => input.checked)?.value || 'sakal';
+        }
+
+        sourceInputs.forEach(sourceInput => {
+            sourceInput.addEventListener('change', () => {
+                chatHistory = [];
+            });
+        });
 
         function trimHistory() {
             if (chatHistory.length > MAX_HISTORY_MESSAGES) {

@@ -1,23 +1,23 @@
 from pathlib import Path
+from functools import lru_cache
 
 from pinecone_text.sparse import BM25Encoder
 
 from app.config import settings
 
 
-def _load_bm25_encoder() -> BM25Encoder:
-    encoder_path = Path(settings.bm25_encoder_path)
+@lru_cache(maxsize=4)
+def _load_bm25_encoder(source: str | None = None) -> BM25Encoder:
+    source_config = settings.news_source_config(source)
+    encoder_path = Path(source_config["bm25_encoder_path"])
 
     if not encoder_path.exists():
         raise RuntimeError(
             f"BM25 encoder file not found at {encoder_path}. "
-            "Run ingestion first so bm25_values.json is created."
+            "Run ingestion first so the source-specific BM25 file is created."
         )
 
     return BM25Encoder().load(str(encoder_path))
-
-
-bm25_encoder = _load_bm25_encoder()
 
 
 def to_pinecone_sparse_values(sparse_vector: dict) -> dict:
@@ -27,6 +27,7 @@ def to_pinecone_sparse_values(sparse_vector: dict) -> dict:
     }
 
 
-def encode_sparse_query(query: str) -> dict:
+def encode_sparse_query(query: str, source: str | None = None) -> dict:
+    bm25_encoder = _load_bm25_encoder(source)
     sparse_vector = bm25_encoder.encode_queries(query)
     return to_pinecone_sparse_values(sparse_vector)
