@@ -11,5 +11,4 @@ data/
 ingest_checkpoint.json
 from-news-rag-v1/
 sakal.json
-bm25_sakal_values.json
 eval_runs/
