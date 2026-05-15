@@ -1,4 +1,5 @@
 import openai
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -11,7 +12,21 @@ from schemas import ChatMessage, QueryAnalysis, clean_text
 client = make_sync_chat_client()
 
 APP_TIMEZONE = ZoneInfo("Asia/Kolkata")
+TOKEN_PATTERN = re.compile(r"\w+", re.UNICODE)
 
+PRICE_INTENT_TERMS = {
+    "price",
+    "prices",
+    "rate",
+    "rates",
+    "costlier",
+    "cheaper",
+    "increase",
+    "increased",
+    "decrease",
+    "decreased",
+    "stable",
+}
 
 def clarification_analysis(question: str, message: str) -> QueryAnalysis:
     return QueryAnalysis(
@@ -77,6 +92,56 @@ def format_history_for_planner(history: list[ChatMessage]) -> str:
     return "\n".join(reversed(lines)) or "No recent conversation."
 
 
+def truncate_query(value: str, max_chars: int = 300) -> str:
+    cleaned = clean_text(value)
+
+    if len(cleaned) <= max_chars:
+        return cleaned
+
+    return cleaned[:max_chars].rsplit(" ", 1)[0].strip() or cleaned[:max_chars]
+
+
+def normalize_analysis_search_query(
+    question: str,
+    analysis: QueryAnalysis,
+) -> QueryAnalysis:
+    if analysis.intent in {"clarify", "out_of_scope"}:
+        return analysis
+
+    question_clean = clean_text(question)
+    search_query_clean = clean_text(analysis.search_query)
+
+    question_tokens = set(TOKEN_PATTERN.findall(question_clean.lower()))
+    search_tokens = set(TOKEN_PATTERN.findall(search_query_clean.lower()))
+
+    required_terms: list[str] = []
+
+    for term in sorted(PRICE_INTENT_TERMS):
+        if term in question_tokens and term not in search_tokens:
+            required_terms.append(term)
+
+    if (
+        {"market", "yard"}.issubset(question_tokens)
+        and ({"vegetable", "vegetables"} & question_tokens)
+        and not ({"vegetable", "vegetables"} & search_tokens)
+    ):
+        required_terms.append("vegetables")
+
+    normalized_query = search_query_clean
+
+    if len(search_tokens) < 2 and len(question_tokens) >= 3:
+        normalized_query = question_clean
+
+    if required_terms:
+        normalized_query = clean_text(" ".join([normalized_query, *required_terms]))
+
+    return analysis.model_copy(
+        update={
+            "search_query": truncate_query(normalized_query),
+        }
+    )
+
+
 def analyze_question(
     question: str,
     history: list[ChatMessage] | None = None,
@@ -130,7 +195,7 @@ def analyze_question(
         if analysis.clarification_needed:
             return analysis.model_copy(update={"intent": "clarify"})
 
-        return analysis
+        return normalize_analysis_search_query(cleaned_question, analysis)
 
     except openai.BadRequestError as exc:
         return out_of_scope_analysis(

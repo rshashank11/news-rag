@@ -47,30 +47,23 @@ class SakalAnswerLanguageTests(unittest.TestCase):
 
 
 class RetrievalRerankingTests(unittest.TestCase):
-    def test_sakal_english_query_is_expanded_with_marathi_terms(self) -> None:
-        expanded_query = expand_sakal_english_query(
-            "In Pune Market Yard, which vegetables became costlier?",
-            source="sakal",
+    def test_sakal_english_query_passthrough(self) -> None:
+        query = "In Pune Market Yard, which vegetables became costlier?"
+
+        self.assertEqual(
+            expand_sakal_english_query(query, source="sakal"),
+            query,
         )
 
-        self.assertIn("मार्केटयार्ड", expanded_query)
-        self.assertIn("भाज्या", expanded_query)
-        self.assertIn("भावात वाढ", expanded_query)
-        self.assertIn("मटार", expanded_query)
-        self.assertIn("टोमॅटो", expanded_query)
-        self.assertIn("पावटा", expanded_query)
+    def test_non_sakal_query_passthrough(self) -> None:
+        query = "Enforcement Directorate PMLA bail orders"
 
-    def test_generic_market_yard_vegetable_query_keeps_price_terms(self) -> None:
-        expanded_query = expand_sakal_english_query(
-            "Pune Market Yard vegetables",
-            source="sakal",
+        self.assertEqual(
+            expand_sakal_english_query(query, source="barandbench"),
+            query,
         )
 
-        self.assertIn("फळभाज्या", expanded_query)
-        self.assertIn("भावात वाढ", expanded_query)
-        self.assertIn("मटार", expanded_query)
-
-    def test_sakal_marathi_query_is_not_expanded(self) -> None:
+    def test_sakal_marathi_query_passthrough(self) -> None:
         query = "पुणे मार्केटयार्डमध्ये कोणत्या भाज्या महागल्या?"
 
         self.assertEqual(
@@ -215,7 +208,7 @@ class RetrievalRerankingTests(unittest.TestCase):
         self.assertEqual(chunks[0].categories, ["Central_Desk", "cndsk", "PNE"])
         self.assertEqual(hybrid_query.call_args.kwargs["top_k"], settings.rerank_candidate_top_k)
 
-    def test_retrieve_chunks_uses_expanded_sakal_query_for_search(self) -> None:
+    def test_retrieve_chunks_uses_planner_query_as_is(self) -> None:
         with (
             patch("app.retrieval.embed_text", return_value=[0.1]) as embed_text,
             patch("app.retrieval.encode_sparse_query", return_value={"indices": [], "values": []}) as encode_sparse_query,
@@ -230,8 +223,10 @@ class RetrievalRerankingTests(unittest.TestCase):
         embedded_query = embed_text.call_args.args[0]
         sparse_query = encode_sparse_query.call_args.args[0]
 
-        self.assertIn("मार्केटयार्ड", embedded_query)
-        self.assertIn("भाज्या", embedded_query)
+        self.assertEqual(
+            embedded_query,
+            "In Pune Market Yard, which vegetables became costlier?",
+        )
         self.assertEqual(embedded_query, sparse_query)
 
 
