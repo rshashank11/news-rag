@@ -395,16 +395,45 @@ def build_context_block(sources: list[NewsSource]) -> str:
     return "\n\n".join(context_parts)
 
 
-def answer_system_prompt_for_source(source: str | None) -> str:
+DEVANAGARI_PATTERN = re.compile(r"[\u0900-\u097F]")
+
+
+def response_language_for_question(question: str) -> str:
+    devanagari_chars = len(DEVANAGARI_PATTERN.findall(question or ""))
+
+    if devanagari_chars >= 2:
+        return "Marathi"
+
+    return "English"
+
+
+def response_language_instruction(question: str) -> str:
+    response_language = response_language_for_question(question)
+
+    if response_language == "Marathi":
+        return (
+            "Response language instruction: The user asked in Marathi. "
+            "Answer in Marathi only. Do not add a separate English translation."
+        )
+
+    return (
+        "Response language instruction: The user asked in English. "
+        "Answer in English only. Do not add a separate Marathi translation."
+    )
+
+
+def answer_system_prompt_for_source(source: str | None, question: str) -> str:
     prompt = ANSWER_SYSTEM_PROMPT
 
     if source == "sakal":
         prompt += (
-            "\n\nWhen answering questions about Sakal news content, provide the "
-            "response in both English and Marathi. Give the user the key answer "
-            "in English, then repeat or summarize the same answer in Marathi. "
-            "Keep your response grounded in the approved sources."
+            "\n\nWhen answering questions about Sakal news content, the retrieved "
+            "source text may be Marathi even when the user asks in English. Use "
+            "the Marathi source evidence, but follow the response language "
+            "instruction exactly."
         )
+
+    prompt += f"\n\n{response_language_instruction(question)}"
 
     return prompt
 
@@ -1074,7 +1103,10 @@ def answer(state: ChatState):
             input=[
                 {
                     "role": "system",
-                    "content": answer_system_prompt_for_source(state["source"]),
+                    "content": answer_system_prompt_for_source(
+                        state["source"],
+                        state["question"],
+                    ),
                 },
                 {
                     "role": "user",

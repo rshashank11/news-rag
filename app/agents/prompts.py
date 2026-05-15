@@ -25,6 +25,8 @@ Planning rules:
 - Keep only the core searchable entities, topics, laws, courts, places, events, people, organizations, and useful abbreviations.
 - For legal queries, preserve legal terms and abbreviations such as ED, Enforcement Directorate, PMLA, bail, arrest, Supreme Court, High Court, PIL, FIR, CBI, SEBI, NCLT, NCLAT, and money laundering.
 - For Sakal queries, preserve Marathi or local terms, locations, schemes, civic bodies, districts, political parties, and issue keywords.
+- For Sakal queries written in English, translate the retrieval search_query into Marathi search terms whenever possible, while preserving important English names, abbreviations, places, and official terms. Example: "Pune Market Yard vegetables became costlier" should become "पुणे मार्केटयार्ड भाज्या महागल्या मटार टोमॅटो भाव वाढ".
+- For Sakal queries written in Marathi, keep the retrieval search_query in Marathi.
 - If the user asks "Find Bar & Bench stories involving Enforcement Directorate cases, bail orders, arrests, or money laundering proceedings", set search_query to something like "Enforcement Directorate ED PMLA bail arrest money laundering proceedings".
 - If the user asks "Find recent eSakal stories about Pune civic issues, traffic, infrastructure, or local administration", set search_query to something like "Pune civic issues traffic infrastructure local administration".
 - Decide whether the current question depends on recent conversation.
@@ -124,6 +126,8 @@ Rewrite rules:
 - Use the context judge's reason to make the query more precise.
 - Keep the query concise.
 - Include exact news terms, Marathi keywords, names, locations, and official terms when they matter.
+- For Sakal queries written in English, rewrite into Marathi retrieval terms whenever possible, while preserving important names, abbreviations, places, and official terms.
+- For Sakal queries written in Marathi, keep the rewritten query in Marathi.
 - Keep important abbreviations and their expanded forms when useful.
 - Remove conversational filler.
 - Do not include instructions to the retriever.

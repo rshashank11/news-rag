@@ -9,6 +9,7 @@ from schemas import RetrievedChunk, clean_text
 
 
 TOKEN_PATTERN = re.compile(r"\w+", re.UNICODE)
+DEVANAGARI_PATTERN = re.compile(r"[\u0900-\u097F]")
 STOPWORDS = {
     "about",
     "after",
@@ -54,6 +55,90 @@ STOPWORDS = {
     "where",
     "which",
     "with",
+}
+
+SAKAL_ENGLISH_QUERY_TERMS = {
+    "additives": ["भेसळ", "भेसळयुक्त", "घटक"],
+    "admission": ["प्रवेश"],
+    "admissions": ["प्रवेश"],
+    "agriculture": ["शेती", "कृषी"],
+    "bribe": ["लाच", "लाचखोरी"],
+    "bribery": ["लाच", "लाचखोरी"],
+    "bus": ["बस", "एसटी"],
+    "cleanliness": ["स्वच्छता"],
+    "college": ["महाविद्यालय"],
+    "colleges": ["महाविद्यालय"],
+    "compensation": ["नुकसानभरपाई", "भरपाई", "मदत"],
+    "consumer": ["ग्राहक"],
+    "costlier": ["महाग", "भावात वाढ", "दर वाढ"],
+    "crop": ["पीक", "पिके"],
+    "crops": ["पीक", "पिके"],
+    "damage": ["नुकसान"],
+    "damselfly": ["डॅम्सेलफ्लाय", "किटक"],
+    "damselflies": ["डॅम्सेलफ्लाय", "किटक"],
+    "date": ["तारीख"],
+    "development": ["विकास"],
+    "diversity": ["विविधता"],
+    "dragonfly": ["ड्रॅगनफ्लाय", "किटक"],
+    "dragonflies": ["ड्रॅगनफ्लाय", "किटक"],
+    "education": ["शिक्षण"],
+    "fee": ["शुल्क"],
+    "farmers": ["शेतकरी", "शेतकऱ्यांना"],
+    "fake": ["बनावट", "निकृष्ट"],
+    "free": ["विनामूल्य"],
+    "ghats": ["घाट", "पश्चिम घाट"],
+    "hygiene": ["स्वच्छता", "अस्वच्छता"],
+    "illness": ["आजार", "लक्षणे"],
+    "insects": ["किटक"],
+    "jobs": ["नोकरी", "भरती"],
+    "kalewadi": ["काळेवाडी"],
+    "mango": ["मँगो", "आंबा"],
+    "market": ["मार्केट", "बाजार", "मार्केटयार्ड"],
+    "money": ["पैसे", "लाच"],
+    "online": ["ऑनलाइन"],
+    "parents": ["पालक"],
+    "peas": ["मटार"],
+    "pimpri": ["पिंपरी"],
+    "portal": ["पोर्टल"],
+    "price": ["भाव", "दर"],
+    "prices": ["भाव", "दर"],
+    "pulp": ["पल्प", "गर"],
+    "rain": ["पाऊस", "अवकाळी पाऊस"],
+    "rainfall": ["पाऊस", "पावसामुळे"],
+    "report": ["अहवाल", "बातमी"],
+    "research": ["संशोधन"],
+    "rte": ["आरटीई"],
+    "school": ["शाळा"],
+    "schools": ["शाळा"],
+    "st": ["एसटी"],
+    "stand": ["स्थानक", "बसस्थानक"],
+    "stands": ["स्थानक", "बसस्थानक"],
+    "study": ["अभ्यास", "संशोधन"],
+    "swargate": ["स्वारगेट"],
+    "symptoms": ["लक्षणे"],
+    "tomato": ["टोमॅटो"],
+    "tomatoes": ["टोमॅटो"],
+    "transparent": ["पारदर्शक"],
+    "truckloads": ["ट्रक", "आवक"],
+    "vegetable": ["भाजी", "भाज्या"],
+    "vegetables": ["भाजी", "भाज्या"],
+    "wakdewadi": ["वाकडेवाडी"],
+    "watermelon": ["कलिंगड"],
+    "western": ["पश्चिम"],
+    "workshop": ["कार्यशाळा"],
+}
+
+SAKAL_ENGLISH_PHRASE_TERMS = {
+    "market yard": ["मार्केटयार्ड"],
+    "pune market yard": ["पुणे", "मार्केटयार्ड"],
+    "rte admission": ["आरटीई", "प्रवेश"],
+    "rte admissions": ["आरटीई", "प्रवेश"],
+    "pimpri chinchwad": ["पिंपरी", "चिंचवड"],
+    "western ghats": ["पश्चिम घाट"],
+    "mango pulp": ["मँगो पल्प", "आंबा गर"],
+    "cleanliness fee": ["स्वच्छता शुल्क"],
+    "bus stand": ["बसस्थानक"],
+    "bus stands": ["बसस्थानक"],
 }
 
 
@@ -169,6 +254,47 @@ def document_matches_date_filter(
         return False
 
     return True
+
+
+def is_probably_english_query(query: str) -> bool:
+    return len(DEVANAGARI_PATTERN.findall(query or "")) < 2
+
+
+def expand_sakal_english_query(query: str, source: str | None = None) -> str:
+    source_name = settings.news_source_config(source)["source"]
+
+    if source_name != "sakal" or not is_probably_english_query(query):
+        return query
+
+    lowered_query = query.lower()
+    expanded_terms: list[str] = []
+    seen = set()
+
+    def add_terms(terms: list[str]) -> None:
+        for term in terms:
+            key = term.lower()
+            if key in seen:
+                continue
+
+            seen.add(key)
+            expanded_terms.append(term)
+
+    for phrase, terms in SAKAL_ENGLISH_PHRASE_TERMS.items():
+        if phrase in lowered_query:
+            add_terms(terms)
+
+    for token in TOKEN_PATTERN.findall(lowered_query):
+        if token in STOPWORDS:
+            continue
+
+        terms = SAKAL_ENGLISH_QUERY_TERMS.get(token)
+        if terms:
+            add_terms(terms)
+
+    if not expanded_terms:
+        return query
+
+    return clean_text(" ".join([query, *expanded_terms]))
 
 
 def metadata_categories_for_source(
@@ -525,6 +651,7 @@ def retrieve_chunks(
     source: str | None = None,
 ) -> list[RetrievedChunk]:
     cleaned_query = clean_text(query)
+    retrieval_query = expand_sakal_english_query(cleaned_query, source=source)
 
     if not cleaned_query:
         raise ValueError("Search query cannot be empty.")
@@ -534,8 +661,8 @@ def retrieve_chunks(
         max(search_top_k, settings.rerank_candidate_top_k)
     )
 
-    dense_vector = embed_text(cleaned_query)
-    sparse_vector = encode_sparse_query(cleaned_query, source=source)
+    dense_vector = embed_text(retrieval_query)
+    sparse_vector = encode_sparse_query(retrieval_query, source=source)
     date_filter = build_pinecone_date_filter(
         from_date,
         to_date,
@@ -563,7 +690,7 @@ def retrieve_chunks(
             chunks.append(chunk)
 
     chunks = rerank_chunks_by_story(
-        cleaned_query,
+        retrieval_query,
         dedupe_chunks(chunks),
     )
 
@@ -591,6 +718,6 @@ def retrieve_chunks(
             fallback_chunks.append(chunk)
 
     return rerank_chunks_by_story(
-        cleaned_query,
+        retrieval_query,
         dedupe_chunks(fallback_chunks),
     )[:search_top_k]
