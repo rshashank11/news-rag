@@ -505,6 +505,9 @@
 
     .source-meta {
       margin-top: 6px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 12px;
       color: var(--muted);
       font-size: 11px;
       font-weight: 700;
@@ -827,8 +830,8 @@
 
         <nav class="source-tabs" aria-label="News source">
           <label class="source-tab active">
-            <input type="radio" name="newsSource" value="sakal" data-label="eSakal" checked />
-            <span>eSakal</span>
+            <input type="radio" name="newsSource" value="sakal" data-label="esakal" checked />
+            <span>ESAKAL</span>
           </label>
 
           <!-- <label class="source-tab">
@@ -930,13 +933,13 @@
           icon: 'map-pinned',
           title: 'Pune Civic Pulse',
           description: 'Local administration, traffic and infrastructure from eSakal.',
-          prompt: 'Find the latest eSakal stories about Pune civic issues, traffic, infrastructure, or local administration.'
+          prompt: 'Find the latest esakal stories about Pune civic issues, traffic, infrastructure, or local administration.'
         },
         {
           icon: 'landmark',
           title: 'Maharashtra Politics',
-          description: 'State decisions, parties and policy shifts from eSakal.',
-          prompt: 'Summarise recent eSakal coverage on Maharashtra politics, state government decisions, and party developments.'
+          description: 'State decisions, parties and policy shifts from esakal.',
+          prompt: 'Summarise recent esakal coverage on Maharashtra politics, state government decisions, and party developments.'
         },
         {
           icon: 'sprout',
@@ -954,13 +957,13 @@
           icon: 'briefcase-business',
           title: 'Jobs and Education',
           description: 'Recruitment, exams, schools, colleges and students.',
-          prompt: 'Find eSakal stories about education, exams, recruitment, students, schools, colleges, or government job updates.'
+          prompt: 'Find esakal stories about education, exams, recruitment, students, schools, colleges, or government job updates.'
         },
         {
           icon: 'building-2',
           title: 'City Development',
           description: 'Urban projects, roads, metro, civic works and planning.',
-          prompt: 'Find eSakal stories about city development, road works, metro projects, public infrastructure, or municipal planning.'
+          prompt: 'Find esakal stories about city development, road works, metro projects, public infrastructure, or municipal planning.'
         }
       ],
 
@@ -1045,7 +1048,7 @@
     }
 
     function selectedSourceLabel() {
-      return selectedSourceInput()?.dataset.label || 'eSakal';
+      return selectedSourceInput()?.dataset.label || 'esakal';
     }
 
     function updateSourceTabs() {
@@ -1374,11 +1377,17 @@
 
     function sourceChipLabel(sourceNumber, sources) {
       const source = findSource(sourceNumber, sources);
-      return source?.headline || `Source ${sourceNumber}`;
+      const articleId = sourceArticleId(source);
+      const title = source?.headline || `Source ${sourceNumber}`;
+      return articleId ? `${articleId} · ${title}` : title;
+    }
+
+    function sourceArticleId(source) {
+      return source?.article_id || source?.story_id || source?.id || '';
     }
 
     function sourceMark() {
-      return selectedSource() === 'barandbench' ? 'B&B' : 'eSakal';
+      return selectedSource() === 'barandbench' ? 'B&B' : 'esakal';
     }
 
     function renderNoteSourceButtons(sourceNumbers, turnId, clickable, sources = []) {
@@ -1407,7 +1416,7 @@
       const chips = sources.map(source => `
         <button class="source-chip" type="button" onclick="highlightSource('${turnId}', '${source.source_number}')">
           <span class="mark">${escapeHtml(sourceMark())}</span>
-          <span>${escapeHtml(source.headline || `Source ${source.source_number}`)}</span>
+          <span>${escapeHtml(sourceChipLabel(source.source_number, sources))}</span>
         </button>
       `).join('');
 
@@ -1514,10 +1523,20 @@
         const card = document.createElement('article');
         card.className = 'source-card';
         card.id = `source-${turnId}-${source.source_number}`;
+        const articleId = sourceArticleId(source);
+        const publishedAt = source.published_at
+          ? `Published ${escapeHtml(source.published_at)}`
+          : 'Published date unavailable';
+        const articleIdMeta = articleId
+          ? `<span>Article ID ${escapeHtml(articleId)}</span>`
+          : '<span>Article ID unavailable</span>';
 
         card.innerHTML = `
           <h3 class="source-title">[Source ${escapeHtml(source.source_number)}] ${escapeHtml(source.headline || 'Untitled')}</h3>
-          <div class="source-meta">${source.published_at ? `Published ${escapeHtml(source.published_at)}` : 'Published date unavailable'}</div>
+          <div class="source-meta">
+            <span>${publishedAt}</span>
+            ${articleIdMeta}
+          </div>
           <details class="evidence">
             <summary>Read evidence</summary>
             <div class="snippet">${escapeHtml(source.match_snippet || '')}</div>
