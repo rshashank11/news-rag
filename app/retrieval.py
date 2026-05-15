@@ -70,7 +70,8 @@ SAKAL_ENGLISH_QUERY_TERMS = {
     "colleges": ["महाविद्यालय"],
     "compensation": ["नुकसानभरपाई", "भरपाई", "मदत"],
     "consumer": ["ग्राहक"],
-    "costlier": ["महाग", "भावात वाढ", "दर वाढ"],
+    "became": ["झाले", "झाली"],
+    "costlier": ["महाग", "महागल्या", "भावात वाढ", "दर वाढ"],
     "crop": ["पीक", "पिके"],
     "crops": ["पीक", "पिके"],
     "damage": ["नुकसान"],
@@ -100,8 +101,11 @@ SAKAL_ENGLISH_QUERY_TERMS = {
     "peas": ["मटार"],
     "pimpri": ["पिंपरी"],
     "portal": ["पोर्टल"],
-    "price": ["भाव", "दर"],
-    "prices": ["भाव", "दर"],
+    "increase": ["वाढ", "वाढली", "भावात वाढ", "दर वाढ"],
+    "increased": ["वाढ", "वाढली", "भावात वाढ", "दर वाढ"],
+    "increases": ["वाढ", "वाढली", "भावात वाढ", "दर वाढ"],
+    "price": ["भाव", "दर", "भावात वाढ"],
+    "prices": ["भाव", "दर", "भावात वाढ"],
     "pulp": ["पल्प", "गर"],
     "rain": ["पाऊस", "अवकाळी पाऊस"],
     "rainfall": ["पाऊस", "पावसामुळे"],
@@ -120,8 +124,8 @@ SAKAL_ENGLISH_QUERY_TERMS = {
     "tomatoes": ["टोमॅटो"],
     "transparent": ["पारदर्शक"],
     "truckloads": ["ट्रक", "आवक"],
-    "vegetable": ["भाजी", "भाज्या"],
-    "vegetables": ["भाजी", "भाज्या"],
+    "vegetable": ["भाजी", "भाज्या", "फळभाज्या"],
+    "vegetables": ["भाजी", "भाज्या", "फळभाज्या"],
     "wakdewadi": ["वाकडेवाडी"],
     "watermelon": ["कलिंगड"],
     "western": ["पश्चिम"],
@@ -131,6 +135,8 @@ SAKAL_ENGLISH_QUERY_TERMS = {
 SAKAL_ENGLISH_PHRASE_TERMS = {
     "market yard": ["मार्केटयार्ड"],
     "pune market yard": ["पुणे", "मार्केटयार्ड"],
+    "market yard vegetables": ["मार्केटयार्ड", "फळभाज्या", "भावात वाढ", "मटार", "टोमॅटो", "पावटा"],
+    "pune market yard vegetables": ["पुणे", "मार्केटयार्ड", "फळभाज्या", "भावात वाढ", "मटार", "टोमॅटो", "पावटा"],
     "rte admission": ["आरटीई", "प्रवेश"],
     "rte admissions": ["आरटीई", "प्रवेश"],
     "pimpri chinchwad": ["पिंपरी", "चिंचवड"],
@@ -282,6 +288,9 @@ def expand_sakal_english_query(query: str, source: str | None = None) -> str:
     for phrase, terms in SAKAL_ENGLISH_PHRASE_TERMS.items():
         if phrase in lowered_query:
             add_terms(terms)
+
+    if "market yard" in lowered_query and re.search(r"\bvegetables?\b", lowered_query):
+        add_terms(["फळभाज्या", "भावात वाढ", "मटार", "टोमॅटो", "पावटा"])
 
     for token in TOKEN_PATTERN.findall(lowered_query):
         if token in STOPWORDS:

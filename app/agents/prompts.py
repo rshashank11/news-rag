@@ -23,6 +23,7 @@ Planning rules:
 - Remove source wrapper words and UI prompt words from search_query, such as "find", "show", "give me", "stories", "articles", "news", "coverage", "report", "reports", "about", "involving", "from", "latest", "recent", "Bar & Bench", "eSakal", and "Sakal", unless those words are part of the actual subject.
 - Do not include the selected source name in search_query. The app already passes the selected source separately.
 - Keep only the core searchable entities, topics, laws, courts, places, events, people, organizations, and useful abbreviations.
+- Preserve price-trend terms such as price, rate, costlier, cheaper, increased, decreased, stable, महाग, स्वस्त, भाव, दर, वाढ, घट, and स्थिर. These are part of the search meaning, not filler.
 - For legal queries, preserve legal terms and abbreviations such as ED, Enforcement Directorate, PMLA, bail, arrest, Supreme Court, High Court, PIL, FIR, CBI, SEBI, NCLT, NCLAT, and money laundering.
 - For Sakal queries, preserve Marathi or local terms, locations, schemes, civic bodies, districts, political parties, and issue keywords.
 - For Sakal queries written in English, translate the retrieval search_query into Marathi search terms whenever possible, while preserving important English names, abbreviations, places, and official terms. Example: "Pune Market Yard vegetables became costlier" should become "पुणे मार्केटयार्ड भाज्या महागल्या मटार टोमॅटो भाव वाढ".

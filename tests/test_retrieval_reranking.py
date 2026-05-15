@@ -56,6 +56,19 @@ class RetrievalRerankingTests(unittest.TestCase):
         self.assertIn("मार्केटयार्ड", expanded_query)
         self.assertIn("भाज्या", expanded_query)
         self.assertIn("भावात वाढ", expanded_query)
+        self.assertIn("मटार", expanded_query)
+        self.assertIn("टोमॅटो", expanded_query)
+        self.assertIn("पावटा", expanded_query)
+
+    def test_generic_market_yard_vegetable_query_keeps_price_terms(self) -> None:
+        expanded_query = expand_sakal_english_query(
+            "Pune Market Yard vegetables",
+            source="sakal",
+        )
+
+        self.assertIn("फळभाज्या", expanded_query)
+        self.assertIn("भावात वाढ", expanded_query)
+        self.assertIn("मटार", expanded_query)
 
     def test_sakal_marathi_query_is_not_expanded(self) -> None:
         query = "पुणे मार्केटयार्डमध्ये कोणत्या भाज्या महागल्या?"
