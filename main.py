@@ -124,6 +124,7 @@ def process_sources(sources: list[NewsSource]) -> list[dict]:
     return [
         {
             "source_number": source.source_number,
+            "article_id": source.article_id,
             "headline": source.headline,
         }
         for source in sources

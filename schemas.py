@@ -127,9 +127,18 @@ class RetrievedChunk(StrictBaseModel):
 
 class NewsSource(StrictBaseModel):
     source_number: int = Field(ge=1)
+    article_id: str | None = Field(default=None, max_length=120)
     headline: str = Field(min_length=1, max_length=500)
     published_at: str | None = None
     match_snippet: str = Field(min_length=1, max_length=12000)
+
+    @field_validator("article_id")
+    @classmethod
+    def clean_article_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = clean_text(value)
+        return cleaned or None
 
     @field_validator("published_at")
     @classmethod

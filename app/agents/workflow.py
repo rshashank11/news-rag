@@ -294,6 +294,7 @@ def build_chunk_based_sources_from_chunks(chunks: list[RetrievedChunk]) -> list[
         sources.append(
             NewsSource(
                 source_number=len(sources) + 1,
+                article_id=chunk.story_id or chunk.id,
                 headline=chunk.headline,
                 published_at=chunk.published_at,
                 match_snippet=truncate_text(
@@ -332,6 +333,7 @@ def build_barandbench_sources_from_postgres(
             sources.append(
                 NewsSource(
                     source_number=len(sources) + 1,
+                    article_id=chunk.story_id or chunk.id,
                     headline=headline,
                     published_at=published_at,
                     match_snippet=truncate_text(match_snippet, MAX_STORY_EXCERPT_CHARS),
