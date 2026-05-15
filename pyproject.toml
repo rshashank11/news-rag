@@ -23,6 +23,7 @@ dependencies = [
     "pinecone>=9.0.0",
     "pinecone-text>=0.10.0",
     "asyncpg>=0.31.0",
+    "huggingface-hub>=1.15.0",
 ]
 
 [build-system]

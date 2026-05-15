@@ -7,7 +7,36 @@ from schemas import RetrievedChunk
 
 
 class RetrievalRerankingTests(unittest.TestCase):
-    def test_headline_and_metadata_can_lift_story_candidate(self) -> None:
+    def test_rerank_mode_none_skips_jina_and_uses_retrieval_score(self) -> None:
+        chunks = [
+            RetrievedChunk(
+                id="story-low-1",
+                story_id="story-low",
+                headline="Lower score",
+                published_at="2026-01-01",
+                chunk_text="Lower retrieval score chunk.",
+                retrieval_score=0.40,
+            ),
+            RetrievedChunk(
+                id="story-high-1",
+                story_id="story-high",
+                headline="Higher score",
+                published_at="2026-01-02",
+                chunk_text="Higher retrieval score chunk.",
+                retrieval_score=0.90,
+            ),
+        ]
+
+        with (
+            patch.object(settings, "rerank_mode", "none"),
+            patch("app.retrieval.call_jina_reranker") as mock_jina,
+        ):
+            ranked_chunks = rerank_chunks_by_story("test query", chunks)
+
+        mock_jina.assert_not_called()
+        self.assertEqual(ranked_chunks[0].id, "story-high-1")
+
+    def test_jina_mode_can_lift_story_candidate(self) -> None:
         chunks = [
             RetrievedChunk(
                 id="less-specific-1",
@@ -32,10 +61,20 @@ class RetrievalRerankingTests(unittest.TestCase):
             ),
         ]
 
-        ranked_chunks = rerank_chunks_by_story(
-            "पवित्र पोर्टल शिक्षक भरती",
-            chunks,
-        )
+        with (
+            patch.object(settings, "rerank_mode", "jina"),
+            patch(
+                "app.retrieval.call_jina_reranker",
+                return_value=[
+                    (chunks[1], 0.95),
+                    (chunks[0], 0.30),
+                ],
+            ),
+        ):
+            ranked_chunks = rerank_chunks_by_story(
+                "पवित्र पोर्टल शिक्षक भरती",
+                chunks,
+            )
 
         self.assertEqual(ranked_chunks[0].story_id, "specific")
 
