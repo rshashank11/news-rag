@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     min_partial_briefing_relevance_score: int = 4
     min_negative_list_relevance_score: int = 3
     rerank_min_token_length: int = 3
-    rerank_candidate_top_k: int = 80
+    rerank_candidate_top_k: int = 30
     rerank_vector_score_weight: float = 1.0
     rerank_headline_overlap_weight: float = 2.5
     rerank_metadata_overlap_weight: float = 1.5
@@ -62,6 +62,15 @@ class Settings(BaseSettings):
     rerank_story_evidence_weight: float = 0.15
     rerank_story_evidence_cap: int = 3
     rerank_debug_story_count: int = 3
+
+    # Reranker mode: "none" uses retrieval-score ordering only, "jina" enables Jina API rerank.
+    rerank_mode: str = "none"
+
+    # Jina reranker
+    jina_api_key: str = ""
+    jina_rerank_url: str = "https://api.jina.ai/v1/rerank"
+    jina_rerank_model: str = "jina-reranker-v3"
+    jina_rerank_top_n: int = 10
 
     model_config = SettingsConfigDict(
         env_file=".env",

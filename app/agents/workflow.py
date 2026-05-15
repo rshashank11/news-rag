@@ -1,4 +1,6 @@
 import re
+import uuid
+from datetime import datetime
 from typing import Literal
 
 from langgraph.graph import END, START, StateGraph
@@ -18,6 +20,8 @@ from app.openai_client import (
     make_sync_chat_client,
 )
 from app.retrieval import retrieve_chunks
+from database import SessionLocal
+from models import StoryMetaData
 from schemas import (
     ChatResponse,
     ChatMessage,
@@ -89,9 +93,53 @@ class ChatState(TypedDict):
 
 def require_analysis(state: ChatState) -> QueryAnalysis:
     analysis = state["analysis"]
+
     if analysis is None:
         raise ValueError("Missing query analysis in workflow state.")
+
     return analysis
+
+
+def story_id_to_uuid(story_id: str | None) -> uuid.UUID | None:
+    if not story_id:
+        return None
+
+    try:
+        return uuid.UUID(str(story_id))
+    except (TypeError, ValueError):
+        return None
+
+
+def datetime_to_iso_date(value) -> str | None:
+    if value is None:
+        return None
+
+    if isinstance(value, str):
+        return value[:10] if value else None
+
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+
+    if hasattr(value, "date"):
+        return value.date().isoformat()
+
+    return None
+
+
+def list_to_line(label: str, values: list[str] | None) -> str | None:
+    if not values:
+        return None
+
+    cleaned_values = [
+        str(value).strip()
+        for value in values
+        if str(value).strip()
+    ]
+
+    if not cleaned_values:
+        return None
+
+    return f"{label}: {', '.join(cleaned_values)}"
 
 
 def merge_consecutive_chunk_texts(chunks: list[RetrievedChunk]) -> str:
@@ -99,6 +147,7 @@ def merge_consecutive_chunk_texts(chunks: list[RetrievedChunk]) -> str:
         chunks,
         key=lambda chunk: chunk.chunk_index if chunk.chunk_index is not None else 0,
     )
+
     merged_words = []
     previous_chunk_index = None
 
@@ -117,27 +166,63 @@ def merge_consecutive_chunk_texts(chunks: list[RetrievedChunk]) -> str:
     return " ".join(merged_words)
 
 
-def build_combined_source_context(
-    story_chunks: list[RetrievedChunk],
-) -> str:
+def build_combined_source_context(story_chunks: list[RetrievedChunk]) -> str:
     best_chunk = story_chunks[0]
-    topics = best_chunk.topics
-    categories = best_chunk.categories
     metadata_lines = []
 
-    if topics:
-        metadata_lines.append(f"Topics: {', '.join(topics)}")
+    topics_line = list_to_line("Topics", best_chunk.topics)
+    categories_line = list_to_line("Categories", best_chunk.categories)
 
-    if categories:
-        metadata_lines.append(f"Categories: {', '.join(categories)}")
+    if topics_line:
+        metadata_lines.append(topics_line)
+
+    if categories_line:
+        metadata_lines.append(categories_line)
 
     context_parts = []
 
     if metadata_lines:
         context_parts.append("\n".join(metadata_lines))
 
-    context_parts.append(f"Matched article context: {merge_consecutive_chunk_texts(story_chunks)}")
+    context_parts.append(
+        f"{merge_consecutive_chunk_texts(story_chunks)}"
+    )
+
     return "\n\n".join(context_parts)
+
+
+def build_full_article_context_from_story(
+    story: StoryMetaData,
+    fallback_chunk: RetrievedChunk,
+) -> str:
+    metadata_lines = []
+
+    topics_line = list_to_line("Topics", story.topics)
+    categories_line = list_to_line("Categories", story.categories)
+
+    if topics_line:
+        metadata_lines.append(topics_line)
+
+    if categories_line:
+        metadata_lines.append(categories_line)
+
+    if story.summary:
+        metadata_lines.append(f"Summary: {story.summary}")
+
+    context_parts = []
+
+    if metadata_lines:
+        context_parts.append("\n".join(metadata_lines))
+
+    if story.full_content:
+        context_parts.append(f"Full article context: {story.full_content}")
+
+    context = "\n\n".join(context_parts).strip()
+
+    if not context:
+        return build_combined_source_context([fallback_chunk])
+
+    return truncate_text(context, MAX_STORY_EXCERPT_CHARS)
 
 
 def top_unique_story_chunks(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
@@ -172,6 +257,7 @@ def source_selection_detail(chunks: list[RetrievedChunk]) -> str:
         )
         for chunk in debug_chunks
     )
+
     detail = f" Top reranked stories: {top_story_text}."
 
     if len(unique_story_chunks) > MAX_ANSWER_SOURCES:
@@ -198,7 +284,7 @@ def group_chunks_by_story(chunks: list[RetrievedChunk]) -> dict[str, list[Retrie
     return grouped_chunks
 
 
-def build_sources_from_chunks(chunks: list[RetrievedChunk]) -> list[NewsSource]:
+def build_chunk_based_sources_from_chunks(chunks: list[RetrievedChunk]) -> list[NewsSource]:
     sources = []
     chunks_by_story = group_chunks_by_story(chunks)
 
@@ -210,7 +296,10 @@ def build_sources_from_chunks(chunks: list[RetrievedChunk]) -> list[NewsSource]:
                 source_number=len(sources) + 1,
                 headline=chunk.headline,
                 published_at=chunk.published_at,
-                match_snippet=build_combined_source_context(story_chunks),
+                match_snippet=truncate_text(
+                    build_combined_source_context(story_chunks),
+                    MAX_STORY_EXCERPT_CHARS,
+                ),
             )
         )
 
@@ -218,6 +307,54 @@ def build_sources_from_chunks(chunks: list[RetrievedChunk]) -> list[NewsSource]:
             break
 
     return sources
+
+
+def build_barandbench_sources_from_postgres(
+    chunks: list[RetrievedChunk],
+) -> list[NewsSource]:
+    sources = []
+    db = SessionLocal()
+
+    try:
+        for chunk in top_unique_story_chunks(chunks):
+            story_uuid = story_id_to_uuid(chunk.story_id)
+            story = db.get(StoryMetaData, story_uuid) if story_uuid else None
+
+            if story:
+                headline = story.headline or chunk.headline
+                published_at = datetime_to_iso_date(story.published_at) or chunk.published_at
+                match_snippet = build_full_article_context_from_story(story, chunk)
+            else:
+                headline = chunk.headline
+                published_at = chunk.published_at
+                match_snippet = build_combined_source_context([chunk])
+
+            sources.append(
+                NewsSource(
+                    source_number=len(sources) + 1,
+                    headline=headline,
+                    published_at=published_at,
+                    match_snippet=truncate_text(match_snippet, MAX_STORY_EXCERPT_CHARS),
+                )
+            )
+
+            if len(sources) >= MAX_ANSWER_SOURCES:
+                break
+
+        return sources
+
+    finally:
+        db.close()
+
+
+def build_sources_from_chunks(
+    chunks: list[RetrievedChunk],
+    source: str,
+) -> list[NewsSource]:
+    if source == "barandbench":
+        return build_barandbench_sources_from_postgres(chunks)
+
+    return build_chunk_based_sources_from_chunks(chunks)
 
 
 def order_sources_for_intent(
@@ -256,6 +393,20 @@ def build_context_block(sources: list[NewsSource]) -> str:
     return "\n\n".join(context_parts)
 
 
+def answer_system_prompt_for_source(source: str | None) -> str:
+    prompt = ANSWER_SYSTEM_PROMPT
+
+    if source == "sakal":
+        prompt += (
+            "\n\nWhen answering questions about Sakal news content, provide the "
+            "response in both English and Marathi. Give the user the key answer "
+            "in English, then repeat or summarize the same answer in Marathi. "
+            "Keep your response grounded in the approved sources."
+        )
+
+    return prompt
+
+
 def extract_cited_source_numbers(answer_text: str) -> set[int]:
     return {
         int(match)
@@ -284,7 +435,10 @@ def cited_sources_for_answer(
     return cited_sources or sources
 
 
-def answer_has_valid_citations(answer: SynthesizedAnswer, sources: list[NewsSource]) -> bool:
+def answer_has_valid_citations(
+    answer: SynthesizedAnswer,
+    sources: list[NewsSource],
+) -> bool:
     if answer.unable_to_answer:
         return True
 
@@ -334,36 +488,8 @@ def question_allows_negative_list_answer(question: str) -> bool:
     return any(term in normalized_question for term in negative_list_terms)
 
 
-def requires_employment_arbitration_scope(state: ChatState, analysis: QueryAnalysis) -> bool:
-    text = " ".join(
-        [
-            state["question"],
-            analysis.search_query,
-            state.get("current_query") or "",
-        ]
-    ).lower()
-
-    has_arbitration = "arbitration" in text or "arbitrator" in text
-    has_employment = "employment" in text or "employee" in text
-
-    return has_arbitration and has_employment
-
-
-def source_supports_employment_arbitration(source: NewsSource) -> bool:
-    text = f"{source.headline} {source.match_snippet}".lower()
-    has_arbitration = "arbitration" in text or "arbitrator" in text
-    has_unilateral = "unilateral" in text or "unilaterally" in text
-    has_employment = (
-        "employment contract" in text
-        or "employment agreement" in text
-    )
-
-    return has_arbitration and has_unilateral and has_employment
-
-
 def answer_coverage_note(state: ChatState, analysis: QueryAnalysis) -> str:
     notes = []
-    normalized_question = state["question"].lower()
 
     if analysis.from_date or analysis.to_date:
         notes.append(
@@ -385,7 +511,7 @@ def answer_coverage_note(state: ChatState, analysis: QueryAnalysis) -> str:
             "Coverage instruction: answer only from the retrieved indexed stories. "
             "If the sources do not prove exhaustive coverage, start by saying the "
             "answer is based on the indexed stories found and cannot confirm every "
-            "order in the period."
+            "item in the period."
         )
 
     if question_allows_negative_list_answer(state["question"]):
@@ -394,23 +520,6 @@ def answer_coverage_note(state: ChatState, analysis: QueryAnalysis) -> str:
             "but do not explicitly identify any item matching the requested criterion, "
             "say that no matching item was found in the retrieved indexed stories. "
             "Still cite the source or sources reviewed."
-        )
-
-    if requires_employment_arbitration_scope(state, analysis):
-        notes.append(
-            "Scope instruction: the answer must stay within employment-contract "
-            "arbitration sources. General unilateral arbitrator appointment cases "
-            "outside employment contracts may be mentioned only as non-answer "
-            "background, not as matching cases."
-        )
-
-    if "resolution professional" in normalized_question:
-        notes.append(
-            "Role instruction: list only people explicitly described as a resolution "
-            "professional, RP, interim resolution professional, or IRP. If the "
-            "sources only list advocates or party representatives, say that no "
-            "resolution professional names were explicitly identified and cite the "
-            "sources reviewed."
         )
 
     return "\n".join(notes) or "No additional coverage constraints."
@@ -472,6 +581,7 @@ def build_process_notes(
 ) -> list[ProcessNote]:
     topic = describe_topic(analysis)
     source_name = display_source_name(source)
+
     notes = [
         ProcessNote(
             title="Planning the answer",
@@ -495,14 +605,23 @@ def build_process_notes(
         )
 
     if sources:
+        if source == "barandbench":
+            source_detail = (
+                f"I found {len(sources)} usable Bar & Bench "
+                f"{'story' if len(sources) == 1 else 'stories'} and hydrated "
+                "the selected story context from Postgres where possible."
+            )
+        else:
+            source_detail = (
+                f"I found {len(sources)} usable Sakal "
+                f"{'story' if len(sources) == 1 else 'stories'} from matched chunks "
+                "and merged chunks belonging to the same article where available."
+            )
+
         notes.append(
             ProcessNote(
                 title="Reviewing news stories",
-                detail=(
-                    f"I found {len(sources)} usable news "
-                    f"{'story' if len(sources) == 1 else 'stories'} "
-                    "from the page data and kept them available below."
-                ),
+                detail=source_detail,
                 source_numbers=[
                     source.source_number
                     for source in sources[:MAX_ANSWER_SOURCES]
@@ -557,6 +676,7 @@ def build_process_notes(
                 ],
             )
         )
+
     elif response_type == "out_of_scope":
         notes.append(
             ProcessNote(
@@ -566,6 +686,7 @@ def build_process_notes(
                 ),
             )
         )
+
     elif response_type == "clarification_needed":
         notes.append(
             ProcessNote(
@@ -576,6 +697,7 @@ def build_process_notes(
                 ),
             )
         )
+
     else:
         notes.append(
             ProcessNote(
@@ -637,7 +759,10 @@ def out_of_scope(state: ChatState):
         f"This assistant can only answer questions about indexed "
         f"{display_source_name(state['source'])} news stories."
     )
-    steps = state.get("steps", []) + [TraceStep(name="Stopped request", detail=message)]
+
+    steps = state.get("steps", []) + [
+        TraceStep(name="Stopped request", detail=message)
+    ]
 
     return {
         "response": ChatResponse(
@@ -661,7 +786,10 @@ def ask_clarification(state: ChatState):
     message = analysis.clarification_question or (
         "Could you add a person, case, court, organization, topic, or time period?"
     )
-    steps = state.get("steps", []) + [TraceStep(name="Asked clarification", detail=message)]
+
+    steps = state.get("steps", []) + [
+        TraceStep(name="Asked clarification", detail=message)
+    ]
 
     return {
         "response": ChatResponse(
@@ -691,15 +819,26 @@ def retrieve(state: ChatState):
         to_date=analysis.to_date,
         source=state["source"],
     )
+
     sources = order_sources_for_intent(
-        build_sources_from_chunks(chunks),
+        build_sources_from_chunks(chunks, state["source"]),
         analysis,
     )
 
     date_detail = ""
     if analysis.from_date or analysis.to_date:
-        date_detail = f" Date filter: {analysis.from_date or 'any'} to {analysis.to_date or 'any'}."
+        date_detail = (
+            f" Date filter: {analysis.from_date or 'any'} "
+            f"to {analysis.to_date or 'any'}."
+        )
+
     selection_detail = source_selection_detail(chunks)
+
+    source_mode = (
+        "Bar & Bench full-article Postgres hydration"
+        if state["source"] == "barandbench"
+        else "Sakal same-story chunk merge"
+    )
 
     return {
         "chunks": chunks,
@@ -712,7 +851,8 @@ def retrieve(state: ChatState):
                 detail=(
                     f"Attempt {state['attempts'] + 1}: reranked candidate pool up to "
                     f"{settings.rerank_candidate_top_k} Pinecone chunk(s), selected "
-                    f"{len(chunks)} chunk(s) and {len(sources)} source(s)."
+                    f"{len(chunks)} chunk(s) and {len(sources)} source(s). "
+                    f"Source workflow: {source_mode}."
                     f"{date_detail}{selection_detail}"
                 ),
             )
@@ -755,25 +895,23 @@ def check_context(state: ChatState):
             ],
             text_format=ContextAssessment,
         )
+
         assessment = response.output_parsed
+
         dated_source_count = sum(
             1
             for source in sources
             if source.published_at
         )
-        missing_required_scope = (
-            requires_employment_arbitration_scope(state, analysis)
-            and not any(source_supports_employment_arbitration(source) for source in sources)
-        )
+
         timeline_supported = (
             analysis.intent == "timeline"
-            and not missing_required_scope
             and assessment.relevance_score >= MIN_TIMELINE_RELEVANCE_SCORE
             and dated_source_count >= MIN_TIMELINE_DATED_SOURCES
         )
+
         partial_briefing_supported = (
             analysis.intent == "briefing"
-            and not missing_required_scope
             and state["attempts"] >= MAX_RETRIEVAL_ATTEMPTS
             and max(
                 [
@@ -783,9 +921,9 @@ def check_context(state: ChatState):
             )
             >= MIN_PARTIAL_BRIEFING_RELEVANCE_SCORE
         )
+
         negative_list_supported = (
             analysis.intent == "answer"
-            and not missing_required_scope
             and state["attempts"] >= MAX_RETRIEVAL_ATTEMPTS
             and question_allows_negative_list_answer(state["question"])
             and max(
@@ -796,36 +934,35 @@ def check_context(state: ChatState):
             )
             >= MIN_NEGATIVE_LIST_RELEVANCE_SCORE
         )
+
         context_enough = (
-            (assessment.context_enough and not missing_required_scope)
+            assessment.context_enough
             or timeline_supported
             or partial_briefing_supported
             or negative_list_supported
         )
-        scope_note = ""
-        if missing_required_scope:
-            scope_note = (
-                " Rejected because the retrieved sources do not satisfy the required "
-                "employment-contract arbitration setting."
-            )
+
         timeline_note = ""
         if timeline_supported and not assessment.context_enough:
             timeline_note = (
                 " Accepted because timeline requests can be answered from "
                 "multiple directly relevant dated stories."
             )
+
         partial_briefing_note = ""
         if partial_briefing_supported and not assessment.context_enough:
             partial_briefing_note = (
                 " Accepted as a partial briefing because the sources are directly "
                 "relevant, but the answer must avoid claiming exhaustive coverage."
             )
+
         negative_list_note = ""
         if negative_list_supported and not assessment.context_enough:
             negative_list_note = (
                 " Accepted for a negative list answer because the sources cover the "
                 "candidate stories but do not show the requested criterion."
             )
+
         return {
             "context_enough": context_enough,
             "suggested_query": assessment.suggested_query,
@@ -835,7 +972,7 @@ def check_context(state: ChatState):
                     name="Judged context",
                     detail=trace_detail(
                         f"Score {assessment.relevance_score}/10. "
-                        f"{assessment.reason}{scope_note}{timeline_note}"
+                        f"{assessment.reason}{timeline_note}"
                         f"{partial_briefing_note}{negative_list_note}"
                     ),
                 )
@@ -877,6 +1014,7 @@ def rewrite_query(state: ChatState):
     if state.get("suggested_query"):
         rewritten_query = state["suggested_query"]
         reason = "Used context judge suggestion."
+
     else:
         try:
             response = client.responses.parse(
@@ -897,6 +1035,7 @@ def rewrite_query(state: ChatState):
                 ],
                 text_format=QueryRewrite,
             )
+
             rewrite = response.output_parsed
             rewritten_query = rewrite.rewritten_query
             reason = rewrite.reason or "LLM rewrote the query."
@@ -933,7 +1072,7 @@ def answer(state: ChatState):
             input=[
                 {
                     "role": "system",
-                    "content": ANSWER_SYSTEM_PROMPT,
+                    "content": answer_system_prompt_for_source(state["source"]),
                 },
                 {
                     "role": "user",
@@ -946,6 +1085,7 @@ def answer(state: ChatState):
             ],
             text_format=SynthesizedAnswer,
         )
+
         synthesized_answer = response.output_parsed
 
         if not answer_has_valid_citations(synthesized_answer, sources):
@@ -953,7 +1093,9 @@ def answer(state: ChatState):
                 state,
                 "The generated answer did not pass citation validation.",
             )
+
         cited_sources = cited_sources_for_answer(synthesized_answer, sources)
+
         steps = state.get("steps", []) + [
             TraceStep(
                 name="Generated answer",
@@ -989,6 +1131,7 @@ def answer(state: ChatState):
 def limited_answer_with_reason(state: ChatState, reason: str):
     analysis = require_analysis(state)
     safe_reason = trace_detail(reason)
+
     steps = state.get("steps", []) + [
         TraceStep(name="Stopped safely", detail=safe_reason)
     ]
@@ -1033,6 +1176,7 @@ builder.add_node("answer", answer)
 builder.add_node("limited_answer", limited_answer)
 
 builder.add_edge(START, "plan_query")
+
 builder.add_conditional_edges(
     "plan_query",
     route_after_planning,
@@ -1042,9 +1186,11 @@ builder.add_conditional_edges(
         "retrieve": "retrieve",
     },
 )
+
 builder.add_edge("out_of_scope", END)
 builder.add_edge("ask_clarification", END)
 builder.add_edge("retrieve", "check_context")
+
 builder.add_conditional_edges(
     "check_context",
     route_after_context,
@@ -1054,6 +1200,7 @@ builder.add_conditional_edges(
         "limited_answer": "limited_answer",
     },
 )
+
 builder.add_edge("rewrite_query", "retrieve")
 builder.add_edge("answer", END)
 builder.add_edge("limited_answer", END)

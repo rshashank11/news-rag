@@ -1,5 +1,5 @@
 import re
-from datetime import date
+import requests
 
 from app.config import settings
 from app.embeddings import embed_text
@@ -59,7 +59,10 @@ STOPWORDS = {
 
 def clamp_top_k(top_k: int | None) -> int:
     requested_top_k = settings.retrieval_top_k if top_k is None else top_k
-    return min(max(requested_top_k, settings.min_retrieval_top_k), settings.max_retrieval_top_k)
+    return min(
+        max(requested_top_k, settings.min_retrieval_top_k),
+        settings.max_retrieval_top_k,
+    )
 
 
 def iso_date_to_yyyymmdd(value: str | None) -> int | None:
@@ -168,17 +171,22 @@ def document_matches_date_filter(
     return True
 
 
-def metadata_categories_for_source(metadata: dict, source: str | None) -> list[str]:
+def metadata_categories_for_source(
+    metadata: dict,
+    source: str | None,
+) -> list[str]:
     source_name = settings.news_source_config(source)["source"]
 
     if source_name == "barandbench":
         return list_metadata_values(metadata.get("categories"))
 
-    return list_metadata_values([
-        metadata.get("edition"),
-        metadata.get("source"),
-        metadata.get("location"),
-    ])
+    return list_metadata_values(
+        [
+            metadata.get("edition"),
+            metadata.get("source"),
+            metadata.get("location"),
+        ]
+    )
 
 
 def format_match(match, source: str | None = None) -> RetrievedChunk | None:
@@ -225,123 +233,233 @@ def dedupe_chunks(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
     return unique_chunks
 
 
-def token_set(text: str) -> set[str]:
-    min_length = settings.rerank_min_token_length
+# -------------------------------------------------------------------
+# OLD CUSTOM RERANKER - COMMENTED OUT
+# -------------------------------------------------------------------
+# We are no longer actively using this heuristic reranker.
+#
+# It used:
+# - Pinecone vector/hybrid score
+# - headline keyword overlap
+# - metadata keyword overlap
+# - chunk text keyword overlap
+# - date recency
+# - same-story evidence bonus
+#
+# We are replacing that active reranking logic with Jina reranker below.
+#
+# from datetime import date
+#
+#
+# def token_set(text: str) -> set[str]:
+#     min_length = settings.rerank_min_token_length
+#
+#     return {
+#         token
+#         for token in TOKEN_PATTERN.findall(text.lower())
+#         if len(token) >= min_length and token not in STOPWORDS
+#     }
+#
+#
+# def overlap_ratio(query_tokens: set[str], text: str) -> float:
+#     if not query_tokens:
+#         return 0.0
+#
+#     text_tokens = token_set(text)
+#
+#     if not text_tokens:
+#         return 0.0
+#
+#     return len(query_tokens & text_tokens) / len(query_tokens)
+#
+#
+# def parse_chunk_date(chunk: RetrievedChunk) -> date | None:
+#     if not chunk.published_at:
+#         return None
+#
+#     try:
+#         return date.fromisoformat(chunk.published_at)
+#     except ValueError:
+#         return None
+#
+#
+# def normalize_float(value: float | None, minimum: float, maximum: float) -> float:
+#     if value is None:
+#         return 0.0
+#
+#     if maximum <= minimum:
+#         return 1.0
+#
+#     return (value - minimum) / (maximum - minimum)
+#
+#
+# def normalize_chunk_date(
+#     chunk_date: date | None,
+#     earliest_date: date | None,
+#     latest_date: date | None,
+# ) -> float:
+#     if chunk_date is None or earliest_date is None or latest_date is None:
+#         return 0.0
+#
+#     total_days = (latest_date - earliest_date).days
+#
+#     if total_days <= 0:
+#         return 0.0
+#
+#     return (chunk_date - earliest_date).days / total_days
+#
+#
+# def rerank_chunk(
+#     chunk: RetrievedChunk,
+#     query_tokens: set[str],
+#     normalized_vector_score: float,
+#     normalized_date_score: float,
+# ) -> RetrievedChunk:
+#     metadata_text = " ".join([*chunk.topics, *chunk.categories])
+#
+#     rerank_score = (
+#         normalized_vector_score * settings.rerank_vector_score_weight
+#         + overlap_ratio(query_tokens, chunk.headline) * settings.rerank_headline_overlap_weight
+#         + overlap_ratio(query_tokens, metadata_text) * settings.rerank_metadata_overlap_weight
+#         + overlap_ratio(query_tokens, chunk.chunk_text) * settings.rerank_chunk_overlap_weight
+#         + normalized_date_score * settings.rerank_date_score_weight
+#     )
+#
+#     return chunk.model_copy(update={"rerank_score": round(rerank_score, 6)})
 
-    return {
-        token
-        for token in TOKEN_PATTERN.findall(text.lower())
-        if len(token) >= min_length and token not in STOPWORDS
-    }
 
-
-def overlap_ratio(query_tokens: set[str], text: str) -> float:
-    if not query_tokens:
-        return 0.0
-
-    text_tokens = token_set(text)
-
-    if not text_tokens:
-        return 0.0
-
-    return len(query_tokens & text_tokens) / len(query_tokens)
-
-
-def parse_chunk_date(chunk: RetrievedChunk) -> date | None:
-    if not chunk.published_at:
-        return None
-
-    try:
-        return date.fromisoformat(chunk.published_at)
-    except ValueError:
-        return None
-
-
-def normalize_float(value: float | None, minimum: float, maximum: float) -> float:
-    if value is None:
-        return 0.0
-
-    if maximum <= minimum:
-        return 1.0
-
-    return (value - minimum) / (maximum - minimum)
-
-
-def normalize_chunk_date(
-    chunk_date: date | None,
-    earliest_date: date | None,
-    latest_date: date | None,
-) -> float:
-    if chunk_date is None or earliest_date is None or latest_date is None:
-        return 0.0
-
-    total_days = (latest_date - earliest_date).days
-
-    if total_days <= 0:
-        return 0.0
-
-    return (chunk_date - earliest_date).days / total_days
-
-
-def rerank_chunk(
-    chunk: RetrievedChunk,
-    query_tokens: set[str],
-    normalized_vector_score: float,
-    normalized_date_score: float,
-) -> RetrievedChunk:
-    metadata_text = " ".join([*chunk.topics, *chunk.categories])
-    rerank_score = (
-        normalized_vector_score * settings.rerank_vector_score_weight
-        + overlap_ratio(query_tokens, chunk.headline) * settings.rerank_headline_overlap_weight
-        + overlap_ratio(query_tokens, metadata_text) * settings.rerank_metadata_overlap_weight
-        + overlap_ratio(query_tokens, chunk.chunk_text) * settings.rerank_chunk_overlap_weight
-        + normalized_date_score * settings.rerank_date_score_weight
-    )
-
-    return chunk.model_copy(update={"rerank_score": round(rerank_score, 6)})
+# -------------------------------------------------------------------
+# JINA RERANKER
+# -------------------------------------------------------------------
 
 
 def story_key(chunk: RetrievedChunk) -> str:
     return chunk.story_id or chunk.id
 
 
-def rerank_chunks_by_story(query: str, chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
+def chunk_to_jina_document(chunk: RetrievedChunk) -> str:
+    metadata_text = " ".join([*chunk.topics, *chunk.categories])
+
+    return "\n".join(
+        [
+            f"Headline: {chunk.headline or 'Untitled'}",
+            f"Published: {chunk.published_at or 'Unknown'}",
+            f"Metadata: {metadata_text}",
+            f"Text: {chunk.chunk_text}",
+        ]
+    )
+
+
+def call_jina_reranker(
+    query: str,
+    chunks: list[RetrievedChunk],
+) -> list[tuple[RetrievedChunk, float]]:
     if not chunks:
         return []
 
-    query_tokens = token_set(query)
-    retrieval_scores = [
-        chunk.retrieval_score
-        for chunk in chunks
-        if chunk.retrieval_score is not None
-    ]
-    minimum_score = min(retrieval_scores) if retrieval_scores else 0.0
-    maximum_score = max(retrieval_scores) if retrieval_scores else 0.0
-    chunk_dates = [
-        chunk_date
-        for chunk in chunks
-        if (chunk_date := parse_chunk_date(chunk)) is not None
-    ]
-    earliest_date = min(chunk_dates) if chunk_dates else None
-    latest_date = max(chunk_dates) if chunk_dates else None
+    if not settings.jina_api_key:
+        raise RuntimeError(
+            "JINA_API_KEY is missing. Add it to your .env or Hugging Face secrets."
+        )
 
-    scored_chunks = [
-        rerank_chunk(
-            chunk=chunk,
-            query_tokens=query_tokens,
-            normalized_vector_score=normalize_float(
-                chunk.retrieval_score,
-                minimum_score,
-                maximum_score,
-            ),
-            normalized_date_score=normalize_chunk_date(
-                parse_chunk_date(chunk),
-                earliest_date,
-                latest_date,
-            ),
+    documents = [
+        chunk_to_jina_document(chunk)
+        for chunk in chunks
+    ]
+
+    top_n = min(settings.jina_rerank_top_n, len(documents))
+
+    payload = {
+        "model": settings.jina_rerank_model,
+        "query": query,
+        "documents": documents,
+        "top_n": top_n,
+    }
+
+    headers = {
+        "Authorization": f"Bearer {settings.jina_api_key}",
+        "Content-Type": "application/json",
+    }
+
+    response = requests.post(
+        settings.jina_rerank_url,
+        headers=headers,
+        json=payload,
+        timeout=30,
+    )
+
+    response.raise_for_status()
+    data = response.json()
+
+    reranked_chunks: list[tuple[RetrievedChunk, float]] = []
+
+    for item in data.get("results", []):
+        chunk_index = item.get("index")
+        relevance_score = item.get("relevance_score", 0.0)
+
+        if chunk_index is None:
+            continue
+
+        if chunk_index < 0 or chunk_index >= len(chunks):
+            continue
+
+        reranked_chunks.append(
+            (
+                chunks[chunk_index],
+                float(relevance_score),
+            )
+        )
+
+    return reranked_chunks
+
+
+def build_retrieval_score_ranked_chunks(
+    chunks: list[RetrievedChunk],
+) -> list[RetrievedChunk]:
+    return [
+        chunk.model_copy(
+            update={
+                "rerank_score": round(chunk.retrieval_score or 0.0, 6),
+            }
         )
         for chunk in chunks
     ]
+
+
+def rerank_chunks_by_story(
+    query: str,
+    chunks: list[RetrievedChunk],
+) -> list[RetrievedChunk]:
+    if not chunks:
+        return []
+
+    rerank_mode = clean_text(settings.rerank_mode or "none").lower()
+
+    if rerank_mode != "jina":
+        scored_chunks = build_retrieval_score_ranked_chunks(chunks)
+    else:
+        try:
+            jina_ranked_chunks = call_jina_reranker(
+                query=query,
+                chunks=chunks,
+            )
+
+            scored_chunks = [
+                chunk.model_copy(
+                    update={
+                        "rerank_score": round(jina_score, 6),
+                    }
+                )
+                for chunk, jina_score in jina_ranked_chunks
+            ]
+
+        except (requests.RequestException, RuntimeError, ValueError) as exc:
+            print(
+                "Warning: Jina reranker unavailable; "
+                f"falling back to retrieval scores ({exc})."
+            )
+            scored_chunks = build_retrieval_score_ranked_chunks(chunks)
+
     grouped_chunks: dict[str, list[RetrievedChunk]] = {}
 
     for chunk in scored_chunks:
@@ -359,22 +477,35 @@ def rerank_chunks_by_story(query: str, chunks: list[RetrievedChunk]) -> list[Ret
             ),
             reverse=True,
         )
-        evidence_count = min(len(ordered_story_chunks), settings.rerank_story_evidence_cap)
+
+        evidence_count = min(
+            len(ordered_story_chunks),
+            settings.rerank_story_evidence_cap,
+        )
+
         story_score = (
             (ordered_story_chunks[0].rerank_score or 0.0)
             + evidence_count * settings.rerank_story_evidence_weight
         )
-        story_groups.append((story_score, group_key, ordered_story_chunks))
+
+        story_groups.append(
+            (
+                story_score,
+                group_key,
+                ordered_story_chunks,
+            )
+        )
 
     ordered_groups = sorted(
         story_groups,
         key=lambda item: (
             item[0],
-            item[2][0].retrieval_score or 0.0,
+            item[2][0].rerank_score or 0.0,
             item[2][0].published_at or "",
         ),
         reverse=True,
     )
+
     max_group_length = max(len(item[2]) for item in ordered_groups)
     ordered_chunks = []
 
@@ -399,10 +530,17 @@ def retrieve_chunks(
         raise ValueError("Search query cannot be empty.")
 
     search_top_k = clamp_top_k(top_k)
-    candidate_top_k = clamp_top_k(max(search_top_k, settings.rerank_candidate_top_k))
+    candidate_top_k = clamp_top_k(
+        max(search_top_k, settings.rerank_candidate_top_k)
+    )
+
     dense_vector = embed_text(cleaned_query)
     sparse_vector = encode_sparse_query(cleaned_query, source=source)
-    date_filter = build_pinecone_date_filter(from_date, to_date, source=source)
+    date_filter = build_pinecone_date_filter(
+        from_date,
+        to_date,
+        source=source,
+    )
     metadata_filter = date_filter
 
     response = hybrid_query(
@@ -417,13 +555,17 @@ def retrieve_chunks(
 
     for match in get_match_value(response, "matches", []) or []:
         chunk = format_match(match, source=source)
+
         if chunk is None:
             continue
 
         if document_matches_date_filter(chunk, from_date, to_date):
             chunks.append(chunk)
 
-    chunks = rerank_chunks_by_story(cleaned_query, dedupe_chunks(chunks))
+    chunks = rerank_chunks_by_story(
+        cleaned_query,
+        dedupe_chunks(chunks),
+    )
 
     if chunks or metadata_filter is None:
         return chunks[:search_top_k]
@@ -436,14 +578,19 @@ def retrieve_chunks(
         top_k=max(candidate_top_k, settings.date_fallback_top_k),
         source=source,
     )
+
     fallback_chunks = []
 
     for match in get_match_value(fallback_response, "matches", []) or []:
         chunk = format_match(match, source=source)
+
         if chunk is None:
             continue
 
         if document_matches_date_filter(chunk, from_date, to_date):
             fallback_chunks.append(chunk)
 
-    return rerank_chunks_by_story(cleaned_query, dedupe_chunks(fallback_chunks))[:search_top_k]
+    return rerank_chunks_by_story(
+        cleaned_query,
+        dedupe_chunks(fallback_chunks),
+    )[:search_top_k]
