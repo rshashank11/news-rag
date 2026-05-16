@@ -23,13 +23,18 @@ Planning rules:
 - Remove source wrapper words and UI prompt words from search_query, such as "find", "show", "give me", "stories", "articles", "news", "coverage", "report", "reports", "about", "involving", "from", "latest", "recent", "Bar & Bench", "eSakal", and "Sakal", unless those words are part of the actual subject.
 - Do not include the selected source name in search_query. The app already passes the selected source separately.
 - Keep only the core searchable entities, topics, laws, courts, places, events, people, organizations, and useful abbreviations.
-- Preserve price-trend terms such as price, rate, costlier, cheaper, increased, decreased, stable, महाग, स्वस्त, भाव, दर, वाढ, घट, and स्थिर. These are part of the search meaning, not filler.
+- Preserve question intent terms such as price/rate movement, reason/why, date, place, quantity, actors, action taken, health risk, and reported outcome. These are part of the search meaning, not filler.
 - For legal queries, preserve legal terms and abbreviations such as ED, Enforcement Directorate, PMLA, bail, arrest, Supreme Court, High Court, PIL, FIR, CBI, SEBI, NCLT, NCLAT, and money laundering.
-- For Sakal queries, preserve Marathi or local terms, locations, schemes, civic bodies, districts, political parties, and issue keywords.
-- For Sakal queries written in English, translate the retrieval search_query into Marathi search terms whenever possible, while preserving important English names, abbreviations, places, and official terms. Example: "Pune Market Yard vegetables became costlier" should become "पुणे मार्केटयार्ड भाज्या महागल्या मटार टोमॅटो भाव वाढ".
-- For Sakal queries written in Marathi, keep the retrieval search_query in Marathi.
+- For Sakal queries, remember that retrieval searches a primarily Marathi news archive. The search_query may be in Marathi even when the user asks in English.
+- For Sakal queries written in English, produce a Marathi retrieval search_query that captures the full meaning of the user question. Preserve important English names, abbreviations, places, and official terms only when they are likely to appear that way in the article.
+- For Sakal English questions, do not merely copy English keywords. Translate and rewrite them into Marathi newspaper-style search terms, including local phrasing for the event, issue, place, reason, and action.
+- For Sakal queries written in Marathi, keep the retrieval search_query in Marathi and clean up only filler.
+- The answer language is not controlled by search_query. If the user asks in English, the answer can still be English even when search_query is Marathi.
 - If the user asks "Find Bar & Bench stories involving Enforcement Directorate cases, bail orders, arrests, or money laundering proceedings", set search_query to something like "Enforcement Directorate ED PMLA bail arrest money laundering proceedings".
 - If the user asks "Find recent eSakal stories about Pune civic issues, traffic, infrastructure, or local administration", set search_query to something like "Pune civic issues traffic infrastructure local administration".
+- Sakal example: If the user asks "In Pune Market Yard, which vegetables became costlier, and why?", set search_query to something like "पुणे मार्केटयार्ड फळभाज्या महागल्या भावात वाढ कारण आवक मटार टोमॅटो पावटा".
+- Sakal example: If the user asks "What health risk is reported in Kalewadi about fake or low-quality mango pulp?", set search_query to something like "काळेवाडी बनावट निकृष्ट मँगो पल्प आंबा गर आरोग्यधोका आजार लक्षणे अस्वच्छता".
+- Sakal example: If the user asks "Why are passengers upset about the two-rupee ST cleanliness fee?", set search_query to something like "एसटी दोन रुपये स्वच्छता शुल्क प्रवासी नाराज बसस्थानक स्वारगेट वाकडेवाडी समस्या".
 - Decide whether the current question depends on recent conversation.
 - Set uses_history to true only when the current question is incomplete without prior context, such as a real follow-up to previously discussed cases, orders, people, sources, or a prior answer.
 - Set uses_history to false when the current question is standalone, changes topic, or can be searched safely from its own text.
@@ -128,6 +133,8 @@ Rewrite rules:
 - Keep the query concise.
 - Include exact news terms, Marathi keywords, names, locations, and official terms when they matter.
 - For Sakal queries written in English, rewrite into Marathi retrieval terms whenever possible, while preserving important names, abbreviations, places, and official terms.
+- For Sakal rewrites, translate the complete question meaning, not only nouns. Preserve why/reason, price movement, quantity, health risk, action taken, and outcome when the user asks for them.
+- Example Sakal rewrite: "In Pune Market Yard, which vegetables became costlier, and why?" -> "पुणे मार्केटयार्ड फळभाज्या महागल्या भावात वाढ कारण आवक".
 - For Sakal queries written in Marathi, keep the rewritten query in Marathi.
 - Keep important abbreviations and their expanded forms when useful.
 - Remove conversational filler.

@@ -14,20 +14,6 @@ client = make_sync_chat_client()
 APP_TIMEZONE = ZoneInfo("Asia/Kolkata")
 TOKEN_PATTERN = re.compile(r"\w+", re.UNICODE)
 
-PRICE_INTENT_TERMS = {
-    "price",
-    "prices",
-    "rate",
-    "rates",
-    "costlier",
-    "cheaper",
-    "increase",
-    "increased",
-    "decrease",
-    "decreased",
-    "stable",
-}
-
 def clarification_analysis(question: str, message: str) -> QueryAnalysis:
     return QueryAnalysis(
         intent="clarify",
@@ -114,26 +100,10 @@ def normalize_analysis_search_query(
     question_tokens = set(TOKEN_PATTERN.findall(question_clean.lower()))
     search_tokens = set(TOKEN_PATTERN.findall(search_query_clean.lower()))
 
-    required_terms: list[str] = []
-
-    for term in sorted(PRICE_INTENT_TERMS):
-        if term in question_tokens and term not in search_tokens:
-            required_terms.append(term)
-
-    if (
-        {"market", "yard"}.issubset(question_tokens)
-        and ({"vegetable", "vegetables"} & question_tokens)
-        and not ({"vegetable", "vegetables"} & search_tokens)
-    ):
-        required_terms.append("vegetables")
-
     normalized_query = search_query_clean
 
     if len(search_tokens) < 2 and len(question_tokens) >= 3:
         normalized_query = question_clean
-
-    if required_terms:
-        normalized_query = clean_text(" ".join([normalized_query, *required_terms]))
 
     return analysis.model_copy(
         update={
@@ -145,9 +115,11 @@ def normalize_analysis_search_query(
 def analyze_question(
     question: str,
     history: list[ChatMessage] | None = None,
+    source: str | None = None,
 ) -> QueryAnalysis:
     cleaned_question = clean_text(question)
     history = history or []
+    selected_source = settings.news_source_config(source)["source"]
 
     if not cleaned_question or len(cleaned_question.split()) < 2:
         return clarification_analysis(
@@ -171,6 +143,17 @@ def analyze_question(
                         "Runtime date context: "
                         f"today is {current_date} in Asia/Kolkata. "
                         "Resolve relative date phrases using this date."
+                    ),
+                },
+                {
+                    "role": "system",
+                    "content": (
+                        f"Selected news source: {selected_source}. "
+                        "Build search_query for this source's indexed archive. "
+                        "For source=sakal, the indexed article text is primarily "
+                        "Marathi, so English user questions need a Marathi "
+                        "retrieval search_query. Keep the final answer language "
+                        "separate from retrieval language."
                     ),
                 },
                 {

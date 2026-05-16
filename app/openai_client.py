@@ -108,6 +108,12 @@ def get_chat_model() -> str:
 
 
 def get_planner_model() -> str:
+    if use_azure_chat() and settings.azure_openai_planner_deployment:
+        return settings.azure_openai_planner_deployment
+
+    if settings.openai_planner_model:
+        return settings.openai_planner_model
+
     return get_chat_model()
 
 

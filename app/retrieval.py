@@ -122,8 +122,8 @@ def document_matches_date_filter(
 
 
 def expand_sakal_english_query(query: str, source: str | None = None) -> str:
-    # Query rewriting is handled upstream by the planner/query parser model.
-    # Keep retrieval side deterministic and pass the query through as-is.
+    # Query translation and expansion belongs in the LLM planner. Retrieval
+    # should execute the planner's search_query without source-specific term maps.
     return query
 
 

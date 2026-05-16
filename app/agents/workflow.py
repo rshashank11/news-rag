@@ -747,6 +747,7 @@ def plan_query(state: ChatState):
     analysis = analyze_question(
         question=state["question"],
         history=state.get("history", []),
+        source=state["source"],
     )
 
     return {

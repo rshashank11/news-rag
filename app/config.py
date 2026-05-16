@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_embedding_model: str = "text-embedding-3-small"
     openai_chat_model: str = "gpt-4o-mini"
+    openai_planner_model: str = ""
 
     azure_openai_api_key: str = ""
     azure_openai_endpoint: str = ""
@@ -15,6 +16,7 @@ class Settings(BaseSettings):
     azure_openai_chat_api_version: str = "2025-04-01-preview"
     azure_openai_embedding_deployment: str = ""
     azure_openai_chat_deployment: str = ""
+    azure_openai_planner_deployment: str = ""
 
     pinecone_api_key: str
     pinecone_index_host: str
