@@ -1,0 +1,97 @@
+<mxfile host="app.diagrams.net" agent="Codex">
+  <diagram id="newsgpt-simple-flow" name="NewsGPT Runtime Architecture">
+    <mxGraphModel dx="1099" dy="605" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="760" background="none" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=30;fontStyle=1;align=center;labelBackgroundColor=none;" value="NewsGPT Runtime Architecture" vertex="1">
+          <mxGeometry height="42" width="560" x="520" y="28" as="geometry" />
+        </mxCell>
+        <mxCell id="user" parent="1" style="shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;outlineConnect=0;fontSize=14;labelBackgroundColor=none;" value="User" vertex="1">
+          <mxGeometry height="105" width="84" x="40" y="197" as="geometry" />
+        </mxCell>
+        <mxCell id="fastapi" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fontSize=13;labelBackgroundColor=none;" value="&lt;b&gt;FastAPI&lt;/b&gt;&lt;br&gt;main.py&lt;br&gt;/chat or stream" vertex="1">
+          <mxGeometry height="100" width="170" x="170" y="168" as="geometry" />
+        </mxCell>
+        <mxCell id="planner" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fontSize=13;labelBackgroundColor=none;" value="&lt;b&gt;Query Parser / Planner&lt;/b&gt;&lt;br&gt;intent detection&lt;br&gt;entity + date extraction&lt;br&gt;clarify if query is vague" vertex="1">
+          <mxGeometry height="145" width="245" x="455" y="145" as="geometry" />
+        </mxCell>
+        <mxCell id="hybrid" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fontSize=13;labelBackgroundColor=none;" value="&lt;b&gt;Hybrid Search&lt;/b&gt;&lt;br&gt;OpenAI embedding vector&lt;br&gt;BM25 sparse query&lt;br&gt;Pinecone namespace + filters" vertex="1">
+          <mxGeometry height="145" width="260" x="820" y="145" as="geometry" />
+        </mxCell>
+        <mxCell id="reranker" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fontSize=13;labelBackgroundColor=none;" value="&lt;b&gt;Reranker&lt;/b&gt;&lt;br&gt;Jina if enabled&lt;br&gt;else score order" vertex="1">
+          <mxGeometry height="100" width="180" x="1210" y="168" as="geometry" />
+        </mxCell>
+        <mxCell id="dedup" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fontSize=13;labelBackgroundColor=none;" value="&lt;b&gt;Dedup&lt;/b&gt;&lt;br&gt;remove duplicates&lt;br&gt;group by story" vertex="1">
+          <mxGeometry height="100" width="180" x="1210" y="425" as="geometry" />
+        </mxCell>
+        <mxCell id="hydrate" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fontSize=13;labelBackgroundColor=none;" value="&lt;b&gt;Hydration&lt;/b&gt;&lt;br&gt;merge Sakal chunks&lt;br&gt;fetch Bar &amp;amp; Bench story" vertex="1">
+          <mxGeometry height="100" width="230" x="860" y="425" as="geometry" />
+        </mxCell>
+        <mxCell id="judge" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fontSize=13;labelBackgroundColor=none;" value="&lt;b&gt;Context Judge&lt;/b&gt;&lt;br&gt;enough evidence?&lt;br&gt;else rewrite + retry" vertex="1">
+          <mxGeometry height="100" width="210" x="540" y="425" as="geometry" />
+        </mxCell>
+        <mxCell id="generation" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fontSize=13;labelBackgroundColor=none;" value="&lt;b&gt;Generation&lt;/b&gt;&lt;br&gt;source-only answer&lt;br&gt;with citations" vertex="1">
+          <mxGeometry height="100" width="190" x="220" y="425" as="geometry" />
+        </mxCell>
+        <mxCell id="note" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=13;align=center;labelBackgroundColor=none;" value="Offline ingestion prepares Pinecone, BM25 files, and Postgres before runtime." vertex="1">
+          <mxGeometry height="30" width="720" x="440" y="655" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" edge="1" parent="1" source="user" style="endArrow=block;html=1;rounded=0;labelBackgroundColor=none;fontColor=default;" target="fastapi" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" edge="1" parent="1" source="fastapi" style="endArrow=block;html=1;rounded=0;labelBackgroundColor=none;fontColor=default;" target="planner" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" edge="1" parent="1" source="planner" style="endArrow=block;html=1;rounded=0;labelBackgroundColor=none;fontColor=default;" target="hybrid" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" edge="1" parent="1" source="hybrid" style="endArrow=block;html=1;rounded=0;labelBackgroundColor=none;fontColor=default;" target="reranker" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" edge="1" parent="1" source="reranker" style="endArrow=block;html=1;rounded=0;labelBackgroundColor=none;fontColor=default;" target="dedup" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" edge="1" parent="1" source="dedup" style="endArrow=block;html=1;rounded=0;labelBackgroundColor=none;fontColor=default;" target="hydrate" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" edge="1" parent="1" source="hydrate" style="endArrow=block;html=1;rounded=0;labelBackgroundColor=none;fontColor=default;" target="judge" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" edge="1" parent="1" source="judge" style="endArrow=block;html=1;rounded=0;labelBackgroundColor=none;fontColor=default;" target="generation" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" edge="1" parent="1" source="generation" style="endArrow=block;html=1;rounded=0;labelBackgroundColor=none;fontColor=default;" target="user" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="l1" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=13;align=center;labelBackgroundColor=none;" value="query" vertex="1">
+          <mxGeometry height="25" width="50" x="125" y="190" as="geometry" />
+        </mxCell>
+        <mxCell id="l2" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=13;align=center;labelBackgroundColor=none;" value="question&lt;br&gt;+ history&lt;br&gt;+ source" vertex="1">
+          <mxGeometry height="70" width="95" x="350" y="148" as="geometry" />
+        </mxCell>
+        <mxCell id="l3" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=13;align=center;labelBackgroundColor=none;" value="parsed query&lt;br&gt;intent + dates&lt;br&gt;top_k" vertex="1">
+          <mxGeometry height="70" width="95" x="713" y="148" as="geometry" />
+        </mxCell>
+        <mxCell id="l4" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=13;align=center;labelBackgroundColor=none;" value="top candidate&lt;br&gt;chunks" vertex="1">
+          <mxGeometry height="50" width="95" x="1097" y="168" as="geometry" />
+        </mxCell>
+        <mxCell id="l5" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=13;align=left;labelBackgroundColor=none;" value="top ranked&lt;br&gt;chunks" vertex="1">
+          <mxGeometry height="50" width="105" x="1305" y="314" as="geometry" />
+        </mxCell>
+        <mxCell id="l6" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=13;align=center;labelBackgroundColor=none;" value="deduped chunks&lt;br&gt;+ story IDs" vertex="1">
+          <mxGeometry height="50" width="110" x="1097" y="425" as="geometry" />
+        </mxCell>
+        <mxCell id="l7" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=13;align=center;labelBackgroundColor=none;" value="source context&lt;br&gt;+ full text" vertex="1">
+          <mxGeometry height="50" width="100" x="753" y="425" as="geometry" />
+        </mxCell>
+        <mxCell id="l8" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=13;align=center;labelBackgroundColor=none;" value="approved evidence&lt;br&gt;+ citations" vertex="1">
+          <mxGeometry height="50" width="115" x="418" y="425" as="geometry" />
+        </mxCell>
+        <mxCell id="l9" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=13;align=left;labelBackgroundColor=none;" value="cited answer&lt;br&gt;or clarification" vertex="1">
+          <mxGeometry height="50" width="100" x="110" y="344" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
