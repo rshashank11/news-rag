@@ -2,6 +2,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    """
+    Load runtime settings from environment variables and the .env file.
+
+    Example:
+    PINECONE_API_KEY and POSTGRESQL_URL are required for the app to talk to
+    Pinecone and Postgres.
+    """
     postgresql_url: str
 
     openai_api_key: str = ""
@@ -22,12 +29,11 @@ class Settings(BaseSettings):
     pinecone_index_host: str
     pinecone_namespace: str = "default"
 
-    bm25_encoder_path: str = "bm25_sakal_values.json"
     default_news_source: str = "sakal"
 
     barandbench_pinecone_index_host: str = ""
     barandbench_pinecone_namespace: str = "barandbench"
-    barandbench_bm25_encoder_path: str = "bm25_values.json"
+    barandbench_bm25_encoder_path: str = "bm25_barandbench_values.json"
 
     sakal_pinecone_index_name: str = "sakal"
     sakal_pinecone_index_host: str = ""
@@ -81,6 +87,13 @@ class Settings(BaseSettings):
     )
 
     def news_source_config(self, source: str | None = None) -> dict[str, str]:
+        """
+        Return Pinecone/BM25 settings for the selected news source.
+
+        Example:
+        source="sakal" returns Sakal namespace + Sakal BM25 file.
+        source="barandbench" returns Bar & Bench namespace + Bar & Bench BM25 file.
+        """
         selected_source = (source or self.default_news_source).strip().lower()
 
         if selected_source == "barandbench":

@@ -16,7 +16,7 @@ from app.agents.workflow import chat_graph
 from app.openai_client import get_chat_model, make_sync_chat_client
 from main import build_initial_state
 from schemas import ChatMessage, ChatResponse, NewsSource, QueryAnalysis, RetrievedChunk
-from scripts.evaluate_pdf_questions import (
+from scripts.evaluate_barandbench_pdf_questions import (
     DEFAULT_PDF_PATH,
     PdfQuestion,
     extract_questions,

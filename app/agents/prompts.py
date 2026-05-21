@@ -25,16 +25,8 @@ Planning rules:
 - Keep only the core searchable entities, topics, laws, courts, places, events, people, organizations, and useful abbreviations.
 - Preserve question intent terms such as price/rate movement, reason/why, date, place, quantity, actors, action taken, health risk, and reported outcome. These are part of the search meaning, not filler.
 - For legal queries, preserve legal terms and abbreviations such as ED, Enforcement Directorate, PMLA, bail, arrest, Supreme Court, High Court, PIL, FIR, CBI, SEBI, NCLT, NCLAT, and money laundering.
-- For Sakal queries, remember that retrieval searches a primarily Marathi news archive. The search_query may be in Marathi even when the user asks in English.
-- For Sakal queries written in English, produce a Marathi retrieval search_query that captures the full meaning of the user question. Preserve important English names, abbreviations, places, and official terms only when they are likely to appear that way in the article.
-- For Sakal English questions, do not merely copy English keywords. Translate and rewrite them into Marathi newspaper-style search terms, including local phrasing for the event, issue, place, reason, and action.
-- For Sakal queries written in Marathi, keep the retrieval search_query in Marathi and clean up only filler.
-- The answer language is not controlled by search_query. If the user asks in English, the answer can still be English even when search_query is Marathi.
-- If the user asks "Find Bar & Bench stories involving Enforcement Directorate cases, bail orders, arrests, or money laundering proceedings", set search_query to something like "Enforcement Directorate ED PMLA bail arrest money laundering proceedings".
-- If the user asks "Find recent eSakal stories about Pune civic issues, traffic, infrastructure, or local administration", set search_query to something like "Pune civic issues traffic infrastructure local administration".
-- Sakal example: If the user asks "In Pune Market Yard, which vegetables became costlier, and why?", set search_query to something like "पुणे मार्केटयार्ड फळभाज्या महागल्या भावात वाढ कारण आवक मटार टोमॅटो पावटा".
-- Sakal example: If the user asks "What health risk is reported in Kalewadi about fake or low-quality mango pulp?", set search_query to something like "काळेवाडी बनावट निकृष्ट मँगो पल्प आंबा गर आरोग्यधोका आजार लक्षणे अस्वच्छता".
-- Sakal example: If the user asks "Why are passengers upset about the two-rupee ST cleanliness fee?", set search_query to something like "एसटी दोन रुपये स्वच्छता शुल्क प्रवासी नाराज बसस्थानक स्वारगेट वाकडेवाडी समस्या".
+- Source-specific retrieval language and examples may be provided in a separate system message. Follow those source-specific rules when present.
+- The answer language is not controlled by search_query. The final answer language is handled later by the answer step.
 - Decide whether the current question depends on recent conversation.
 - Set uses_history to true only when the current question is incomplete without prior context, such as a real follow-up to previously discussed cases, orders, people, sources, or a prior answer.
 - Set uses_history to false when the current question is standalone, changes topic, or can be searched safely from its own text.
@@ -72,6 +64,31 @@ Date rules:
 - If the user asks for latest, recent, current, newest, fresh, or new updates, treat it as a recent-news request: set from_date to 90 days before the runtime current date, set to_date to the runtime current date, and set k to 80.
 - If no date or time window is mentioned, leave from_date and to_date as null.
 """
+
+
+# Source-specific retrieval rules stay separate so one archive's language or
+# domain assumptions do not leak into another archive.
+PLANNER_SOURCE_PROMPTS = {
+    "barandbench": """
+Selected source rules for Bar & Bench:
+- The indexed archive is primarily English legal news.
+- Keep legal names, courts, case types, statutes, abbreviations, law firms, lawyers, judges, tribunals, and institutions in English.
+- Preserve legal terms and abbreviations such as ED, Enforcement Directorate, PMLA, bail, arrest, Supreme Court, High Court, PIL, FIR, CBI, SEBI, NCLT, NCLAT, insolvency, arbitration, contempt, UAPA, IBC, and money laundering.
+- Example: If the user asks "Find Bar & Bench stories involving Enforcement Directorate cases, bail orders, arrests, or money laundering proceedings", use a search_query like "Enforcement Directorate ED PMLA bail arrest money laundering proceedings".
+""",
+    "sakal": """
+Selected source rules for Sakal:
+- The indexed archive is primarily Marathi news.
+- The search_query may be in Marathi even when the user asks in English.
+- For English user questions, produce a Marathi retrieval search_query that captures the full meaning of the question.
+- Preserve important English names, abbreviations, places, and official terms only when they are likely to appear that way in the article.
+- Do not merely copy English keywords. Translate and rewrite into Marathi newspaper-style search terms, including local phrasing for event, issue, place, reason, quantity, price movement, health risk, action taken, and outcome.
+- For Marathi user questions, keep the retrieval search_query in Marathi and clean up only filler.
+- Example: If the user asks "In Pune Market Yard, which vegetables became costlier, and why?", use a search_query like "पुणे मार्केटयार्ड फळभाज्या महागल्या भावात वाढ कारण आवक मटार टोमॅटो पावटा".
+- Example: If the user asks "What health risk is reported in Kalewadi about fake or low-quality mango pulp?", use a search_query like "काळेवाडी बनावट निकृष्ट मँगो पल्प आंबा गर आरोग्यधोका आजार लक्षणे अस्वच्छता".
+- Example: If the user asks "Why are passengers upset about the two-rupee ST cleanliness fee?", use a search_query like "एसटी दोन रुपये स्वच्छता शुल्क प्रवासी नाराज बसस्थानक स्वारगेट वाकडेवाडी समस्या".
+""",
+}
 
 
 CONTEXT_JUDGE_SYSTEM_PROMPT = """
@@ -131,15 +148,42 @@ Rewrite rules:
 - Preserve important names, organizations, dates, places, events, policy terms, schemes, courts, cases, and official bodies.
 - Use the context judge's reason to make the query more precise.
 - Keep the query concise.
-- Include exact news terms, Marathi keywords, names, locations, and official terms when they matter.
-- For Sakal queries written in English, rewrite into Marathi retrieval terms whenever possible, while preserving important names, abbreviations, places, and official terms.
-- For Sakal rewrites, translate the complete question meaning, not only nouns. Preserve why/reason, price movement, quantity, health risk, action taken, and outcome when the user asks for them.
-- Example Sakal rewrite: "In Pune Market Yard, which vegetables became costlier, and why?" -> "पुणे मार्केटयार्ड फळभाज्या महागल्या भावात वाढ कारण आवक".
-- For Sakal queries written in Marathi, keep the rewritten query in Marathi.
+- Include exact news terms, names, locations, and official terms when they matter.
+- Follow any source-specific rewrite rules supplied in a separate system message.
 - Keep important abbreviations and their expanded forms when useful.
 - Remove conversational filler.
 - Do not include instructions to the retriever.
 """
+
+
+# Rewrites are also source-aware because a failed Sakal search often needs
+# Marathi terms, while Bar & Bench searches should remain legal-English.
+QUERY_REWRITE_SOURCE_PROMPTS = {
+    "barandbench": """
+Selected source rewrite rules for Bar & Bench:
+- Keep the rewritten query in English.
+- Preserve legal names, courts, case types, statutes, abbreviations, law firms, lawyers, judges, tribunals, and institutions.
+- Keep useful abbreviations alongside expanded terms when both may appear in indexed stories.
+""",
+    "sakal": """
+Selected source rewrite rules for Sakal:
+- Rewrite English questions into Marathi retrieval terms whenever possible.
+- Preserve important names, abbreviations, places, and official terms when they are likely to appear that way in the article.
+- Translate the complete question meaning, not only nouns.
+- Preserve why/reason, price movement, quantity, health risk, action taken, and outcome when the user asks for them.
+- Example: "In Pune Market Yard, which vegetables became costlier, and why?" -> "पुणे मार्केटयार्ड फळभाज्या महागल्या भावात वाढ कारण आवक".
+- For Marathi questions, keep the rewritten query in Marathi.
+""",
+}
+
+
+ANSWER_SOURCE_PROMPTS = {
+    "sakal": (
+        "When answering questions about Sakal news content, the retrieved source "
+        "text may be Marathi even when the user asks in English. Use the Marathi "
+        "source evidence, but follow the response language instruction exactly."
+    ),
+}
 
 
 ANSWER_SYSTEM_PROMPT = """
@@ -249,3 +293,45 @@ Style:
 - Mention limitations instead of guessing.
 - Avoid sensational language.
 """
+
+
+def source_prompt(source: str | None, prompts: dict[str, str]) -> str:
+    """
+    Pick the prompt rules for one source.
+
+    Example:
+    Sakal gets Marathi retrieval rules.
+    Bar & Bench gets English legal-news retrieval rules.
+    """
+    source_name = (source or "").strip().lower()
+    return prompts.get(source_name, "").strip()
+
+
+def planner_source_prompt(source: str | None) -> str:
+    """
+    Return extra planner rules for the selected source.
+
+    These rules help the planner create better search queries before retrieval.
+    """
+    return source_prompt(source, PLANNER_SOURCE_PROMPTS)
+
+
+def query_rewrite_source_prompt(source: str | None) -> str:
+    """
+    Return extra rewrite rules for the selected source.
+
+    Example:
+    A failed Sakal search may need Marathi search terms.
+    A failed Bar & Bench search should stay in legal English.
+    """
+    return source_prompt(source, QUERY_REWRITE_SOURCE_PROMPTS)
+
+
+def answer_source_prompt(source: str | None) -> str:
+    """
+    Return extra answer rules for the selected source.
+
+    Example:
+    Sakal source text may be Marathi even when the user asks in English.
+    """
+    return source_prompt(source, ANSWER_SOURCE_PROMPTS)

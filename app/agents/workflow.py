@@ -1,18 +1,22 @@
 import re
-import uuid
-from datetime import datetime
 from typing import Literal
 
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
+from app.barandbench_sources import (
+    build_barandbench_sources_from_postgres as build_barandbench_sources,
+)
 from app.agents.planner import analyze_question
 from app.agents.prompts import (
     ANSWER_SYSTEM_PROMPT,
     CONTEXT_JUDGE_SYSTEM_PROMPT,
     QUERY_REWRITE_SYSTEM_PROMPT,
+    answer_source_prompt,
+    query_rewrite_source_prompt,
 )
 from app.config import settings
+from app.news_sources import source_profile
 from app.openai_client import (
     get_answer_model,
     get_context_judge_model,
@@ -20,8 +24,7 @@ from app.openai_client import (
     make_sync_chat_client,
 )
 from app.retrieval import retrieve_chunks
-from database import SessionLocal
-from models import StoryMetaData
+from app.source_context import build_combined_source_context, truncate_text
 from schemas import (
     ChatResponse,
     ChatMessage,
@@ -40,7 +43,6 @@ MAX_RETRIEVAL_ATTEMPTS = settings.max_retrieval_attempts
 MAX_ANSWER_SOURCES = settings.max_answer_sources
 MAX_CONTEXT_CHARS_PER_SOURCE = settings.max_context_chars_per_source
 MAX_STORY_EXCERPT_CHARS = settings.max_story_excerpt_chars
-SAKAL_CHUNK_OVERLAP_WORDS = 50
 MIN_TIMELINE_DATED_SOURCES = settings.min_timeline_dated_sources
 MIN_TIMELINE_RELEVANCE_SCORE = settings.min_timeline_relevance_score
 MIN_PARTIAL_BRIEFING_RELEVANCE_SCORE = settings.min_partial_briefing_relevance_score
@@ -51,32 +53,41 @@ client = make_sync_chat_client()
 
 
 def display_source_name(source: str | None) -> str:
-    if source == "barandbench":
-        return "Bar & Bench"
+    """
+    Return the friendly name shown to users.
 
-    if source == "sakal":
-        return "Sakal"
-
-    return "selected"
-
-
-def truncate_text(text: str, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-
-    suffix = " ... [truncated]"
-    return f"{text[:max_chars - len(suffix)].rstrip()}{suffix}"
+    Example:
+    "barandbench" becomes "Bar & Bench".
+    """
+    return source_profile(source).display_name
 
 
 def process_note_detail(text: str) -> str:
+    """
+    Keep process-note text short enough for the API response schema.
+
+    Process notes are user-visible status explanations, not full debug logs.
+    """
     return truncate_text(text, 700)
 
 
 def trace_detail(text: str) -> str:
+    """
+    Keep internal trace details within the schema size limit.
+
+    Trace details help debugging, but they should not become huge prompt dumps.
+    """
     return truncate_text(text, 1000)
 
 
 class ChatState(TypedDict):
+    """
+    Data passed between LangGraph workflow steps.
+
+    Example:
+    plan_query fills "analysis", retrieve fills "chunks" and "sources",
+    answer fills "response".
+    """
     question: str
     source: str
     history: list[ChatMessage]
@@ -92,6 +103,12 @@ class ChatState(TypedDict):
 
 
 def require_analysis(state: ChatState) -> QueryAnalysis:
+    """
+    Read the planned query analysis from graph state.
+
+    If analysis is missing, the workflow is in a bad state and should fail early
+    instead of producing an ungrounded answer.
+    """
     analysis = state["analysis"]
 
     if analysis is None:
@@ -100,132 +117,14 @@ def require_analysis(state: ChatState) -> QueryAnalysis:
     return analysis
 
 
-def story_id_to_uuid(story_id: str | None) -> uuid.UUID | None:
-    if not story_id:
-        return None
-
-    try:
-        return uuid.UUID(str(story_id))
-    except (TypeError, ValueError):
-        return None
-
-
-def datetime_to_iso_date(value) -> str | None:
-    if value is None:
-        return None
-
-    if isinstance(value, str):
-        return value[:10] if value else None
-
-    if isinstance(value, datetime):
-        return value.date().isoformat()
-
-    if hasattr(value, "date"):
-        return value.date().isoformat()
-
-    return None
-
-
-def list_to_line(label: str, values: list[str] | None) -> str | None:
-    if not values:
-        return None
-
-    cleaned_values = [
-        str(value).strip()
-        for value in values
-        if str(value).strip()
-    ]
-
-    if not cleaned_values:
-        return None
-
-    return f"{label}: {', '.join(cleaned_values)}"
-
-
-def merge_consecutive_chunk_texts(chunks: list[RetrievedChunk]) -> str:
-    ordered_chunks = sorted(
-        chunks,
-        key=lambda chunk: chunk.chunk_index if chunk.chunk_index is not None else 0,
-    )
-
-    merged_words = []
-    previous_chunk_index = None
-
-    for chunk in ordered_chunks:
-        chunk_words = chunk.chunk_text.split()
-
-        if (
-            previous_chunk_index is not None
-            and chunk.chunk_index == previous_chunk_index + 1
-        ):
-            chunk_words = chunk_words[SAKAL_CHUNK_OVERLAP_WORDS:]
-
-        merged_words.extend(chunk_words)
-        previous_chunk_index = chunk.chunk_index
-
-    return " ".join(merged_words)
-
-
-def build_combined_source_context(story_chunks: list[RetrievedChunk]) -> str:
-    best_chunk = story_chunks[0]
-    metadata_lines = []
-
-    topics_line = list_to_line("Topics", best_chunk.topics)
-    categories_line = list_to_line("Categories", best_chunk.categories)
-
-    if topics_line:
-        metadata_lines.append(topics_line)
-
-    if categories_line:
-        metadata_lines.append(categories_line)
-
-    context_parts = []
-
-    if metadata_lines:
-        context_parts.append("\n".join(metadata_lines))
-
-    context_parts.append(
-        f"{merge_consecutive_chunk_texts(story_chunks)}"
-    )
-
-    return "\n\n".join(context_parts)
-
-
-def build_full_article_context_from_story(
-    story: StoryMetaData,
-    fallback_chunk: RetrievedChunk,
-) -> str:
-    metadata_lines = []
-
-    topics_line = list_to_line("Topics", story.topics)
-    categories_line = list_to_line("Categories", story.categories)
-
-    if topics_line:
-        metadata_lines.append(topics_line)
-
-    if categories_line:
-        metadata_lines.append(categories_line)
-
-    if story.summary:
-        metadata_lines.append(f"Summary: {story.summary}")
-
-    context_parts = []
-
-    if metadata_lines:
-        context_parts.append("\n".join(metadata_lines))
-
-    if story.full_content:
-        context_parts.append(f"Full article context: {story.full_content}")
-
-    context = "\n\n".join(context_parts).strip()
-
-    if not context:
-        return build_combined_source_context([fallback_chunk])
-
-    return truncate_text(context, MAX_STORY_EXCERPT_CHARS)
-
-
 def top_unique_story_chunks(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
+    """
+    Keep only the best chunk from each story.
+
+    Example:
+    If one article returned 5 chunks, this keeps the first one for source
+    selection so other stories still get a chance.
+    """
     seen_story_ids = set()
     unique_story_chunks = []
 
@@ -242,6 +141,11 @@ def top_unique_story_chunks(chunks: list[RetrievedChunk]) -> list[RetrievedChunk
 
 
 def source_selection_detail(chunks: list[RetrievedChunk]) -> str:
+    """
+    Build a short debug note about which stories retrieval selected.
+
+    This is useful when checking why the chatbot chose certain sources.
+    """
     unique_story_chunks = top_unique_story_chunks(chunks)
 
     if not unique_story_chunks:
@@ -276,6 +180,13 @@ def source_selection_detail(chunks: list[RetrievedChunk]) -> str:
 
 
 def group_chunks_by_story(chunks: list[RetrievedChunk]) -> dict[str, list[RetrievedChunk]]:
+    """
+    Put chunks from the same article/story together.
+
+    Example:
+    "PNE26Y81513-0" and "PNE26Y81513-1" should be grouped under the same
+    article before we rebuild context for the answer.
+    """
     grouped_chunks: dict[str, list[RetrievedChunk]] = {}
 
     for chunk in chunks:
@@ -284,9 +195,20 @@ def group_chunks_by_story(chunks: list[RetrievedChunk]) -> dict[str, list[Retrie
     return grouped_chunks
 
 
-def build_chunk_based_sources_from_chunks(chunks: list[RetrievedChunk]) -> list[NewsSource]:
+def build_chunk_based_sources_from_chunks(
+    chunks: list[RetrievedChunk],
+    source: str,
+) -> list[NewsSource]:
+    """
+    Build answer sources directly from retrieved Pinecone chunks.
+
+    Example:
+    Sakal does not hydrate full articles from Postgres here. It uses the matched
+    chunk text plus nearby same-article chunks from Pinecone.
+    """
     sources = []
     chunks_by_story = group_chunks_by_story(chunks)
+    profile = source_profile(source)
 
     for chunk in top_unique_story_chunks(chunks):
         story_chunks = chunks_by_story.get(chunk.story_id or chunk.id, [chunk])
@@ -298,7 +220,10 @@ def build_chunk_based_sources_from_chunks(chunks: list[RetrievedChunk]) -> list[
                 headline=chunk.headline,
                 published_at=chunk.published_at,
                 match_snippet=truncate_text(
-                    build_combined_source_context(story_chunks),
+                    build_combined_source_context(
+                        story_chunks,
+                        profile.chunk_overlap_words,
+                    ),
                     MAX_STORY_EXCERPT_CHARS,
                 ),
             )
@@ -310,59 +235,51 @@ def build_chunk_based_sources_from_chunks(chunks: list[RetrievedChunk]) -> list[
     return sources
 
 
-def build_barandbench_sources_from_postgres(
+def build_barandbench_sources_from_chunks(
     chunks: list[RetrievedChunk],
 ) -> list[NewsSource]:
-    sources = []
-    db = SessionLocal()
+    """
+    Build Bar & Bench sources using Postgres full-article hydration.
 
-    try:
-        for chunk in top_unique_story_chunks(chunks):
-            story_uuid = story_id_to_uuid(chunk.story_id)
-            story = db.get(StoryMetaData, story_uuid) if story_uuid else None
-
-            if story:
-                headline = story.headline or chunk.headline
-                published_at = datetime_to_iso_date(story.published_at) or chunk.published_at
-                match_snippet = build_full_article_context_from_story(story, chunk)
-            else:
-                headline = chunk.headline
-                published_at = chunk.published_at
-                match_snippet = build_combined_source_context([chunk])
-
-            sources.append(
-                NewsSource(
-                    source_number=len(sources) + 1,
-                    article_id=chunk.story_id or chunk.id,
-                    headline=headline,
-                    published_at=published_at,
-                    match_snippet=truncate_text(match_snippet, MAX_STORY_EXCERPT_CHARS),
-                )
-            )
-
-            if len(sources) >= MAX_ANSWER_SOURCES:
-                break
-
-        return sources
-
-    finally:
-        db.close()
+    Pinecone finds the story first. Postgres then provides the fuller story text
+    for answer generation.
+    """
+    return build_barandbench_sources(
+        chunks=top_unique_story_chunks(chunks),
+        max_sources=MAX_ANSWER_SOURCES,
+        max_context_chars=MAX_STORY_EXCERPT_CHARS,
+    )
 
 
 def build_sources_from_chunks(
     chunks: list[RetrievedChunk],
     source: str,
 ) -> list[NewsSource]:
-    if source == "barandbench":
-        return build_barandbench_sources_from_postgres(chunks)
+    """
+    Choose how to build answer sources for the selected archive.
 
-    return build_chunk_based_sources_from_chunks(chunks)
+    Example:
+    Sakal uses chunk-based context.
+    Bar & Bench uses Postgres-hydrated story context.
+    """
+    profile = source_profile(source)
+
+    if profile.hydrate_sources_from_postgres:
+        return build_barandbench_sources_from_chunks(chunks)
+
+    return build_chunk_based_sources_from_chunks(chunks, source)
 
 
 def order_sources_for_intent(
     sources: list[NewsSource],
     analysis: QueryAnalysis,
 ) -> list[NewsSource]:
+    """
+    Sort sources oldest-to-newest for timeline questions.
+
+    Example:
+    A timeline answer should list April 1 before April 10.
+    """
     if analysis.intent != "timeline":
         return sources
 
@@ -378,6 +295,12 @@ def order_sources_for_intent(
 
 
 def build_context_block(sources: list[NewsSource]) -> str:
+    """
+    Turn selected sources into the text block given to the model.
+
+    The model only answers from this block, so every source includes its number,
+    headline, publish date, and context snippet.
+    """
     context_parts = []
 
     for source in sources:
@@ -399,6 +322,13 @@ DEVANAGARI_PATTERN = re.compile(r"[\u0900-\u097F]")
 
 
 def response_language_for_question(question: str) -> str:
+    """
+    Decide whether the answer should be English or Marathi.
+
+    Simple rule:
+    If the question contains enough Devanagari characters, answer in Marathi.
+    Otherwise answer in English.
+    """
     devanagari_chars = len(DEVANAGARI_PATTERN.findall(question or ""))
 
     if devanagari_chars >= 2:
@@ -408,6 +338,13 @@ def response_language_for_question(question: str) -> str:
 
 
 def response_language_instruction(question: str) -> str:
+    """
+    Build the instruction that locks the answer language.
+
+    Example:
+    If the user asked in English but Sakal source text is Marathi, the answer
+    should still be in English.
+    """
     response_language = response_language_for_question(question)
 
     if response_language == "Marathi":
@@ -423,15 +360,19 @@ def response_language_instruction(question: str) -> str:
 
 
 def answer_system_prompt_for_source(source: str | None, question: str) -> str:
-    prompt = ANSWER_SYSTEM_PROMPT
+    """
+    Combine all answer rules into one system prompt.
 
-    if source == "sakal":
-        prompt += (
-            "\n\nWhen answering questions about Sakal news content, the retrieved "
-            "source text may be Marathi even when the user asks in English. Use "
-            "the Marathi source evidence, but follow the response language "
-            "instruction exactly."
-        )
+    It includes:
+    - generic grounding/citation rules,
+    - source-specific notes,
+    - language instruction based on the user's question.
+    """
+    prompt = ANSWER_SYSTEM_PROMPT
+    source_prompt = answer_source_prompt(source)
+
+    if source_prompt:
+        prompt += f"\n\n{source_prompt}"
 
     prompt += f"\n\n{response_language_instruction(question)}"
 
@@ -439,6 +380,12 @@ def answer_system_prompt_for_source(source: str | None, question: str) -> str:
 
 
 def extract_cited_source_numbers(answer_text: str) -> set[int]:
+    """
+    Find citation numbers written inside the answer text.
+
+    Example:
+    "The court granted bail [Source 2]." returns {2}.
+    """
     return {
         int(match)
         for match in CITATION_PATTERN.findall(answer_text)
@@ -449,6 +396,13 @@ def cited_sources_for_answer(
     answer: SynthesizedAnswer,
     sources: list[NewsSource],
 ) -> list[NewsSource]:
+    """
+    Return only sources that the final answer actually cited.
+
+    Example:
+    If 6 sources were reviewed but the answer cites Source 1 and Source 3,
+    the API response should expose those cited sources first.
+    """
     cited_numbers = (
         set(answer.cited_source_numbers)
         | extract_cited_source_numbers(answer.answer)
@@ -470,6 +424,11 @@ def answer_has_valid_citations(
     answer: SynthesizedAnswer,
     sources: list[NewsSource],
 ) -> bool:
+    """
+    Check that the answer cites real sources from the provided context.
+
+    This prevents the model from inventing citations like [Source 99].
+    """
     if answer.unable_to_answer:
         return True
 
@@ -493,6 +452,13 @@ def answer_has_valid_citations(
 
 
 def question_requests_exhaustive_coverage(question: str) -> bool:
+    """
+    Detect questions that ask for "all" or complete coverage.
+
+    Example:
+    If the user asks "all stories this month", the answer must say whether the
+    retrieved sources may be incomplete.
+    """
     normalized_question = question.lower()
     exhaustive_terms = [
         "all ",
@@ -506,6 +472,13 @@ def question_requests_exhaustive_coverage(question: str) -> bool:
 
 
 def question_allows_negative_list_answer(question: str) -> bool:
+    """
+    Detect questions where "none found" can be a valid grounded answer.
+
+    Example:
+    "Did any of these cases mention bail?" can be answered as "No matching item
+    was found" if the reviewed sources support that.
+    """
     normalized_question = question.lower()
     negative_list_terms = [
         "did any",
@@ -520,6 +493,13 @@ def question_allows_negative_list_answer(question: str) -> bool:
 
 
 def answer_coverage_note(state: ChatState, analysis: QueryAnalysis) -> str:
+    """
+    Build extra instructions for answer generation.
+
+    Example:
+    If the retrieval was accepted as only a partial briefing, this note tells the
+    answer model not to claim the results are exhaustive.
+    """
     notes = []
 
     if analysis.from_date or analysis.to_date:
@@ -557,6 +537,12 @@ def answer_coverage_note(state: ChatState, analysis: QueryAnalysis) -> str:
 
 
 def describe_topic(analysis: QueryAnalysis) -> str:
+    """
+    Pick a short topic label for user-visible process notes.
+
+    Example:
+    If entities are ["Pune", "Market Yard"], use those instead of a long query.
+    """
     if analysis.entities:
         return ", ".join(analysis.entities[:4])
 
@@ -564,6 +550,12 @@ def describe_topic(analysis: QueryAnalysis) -> str:
 
 
 def describe_intent(analysis: QueryAnalysis) -> str:
+    """
+    Convert internal intent into simple wording for process notes.
+
+    Example:
+    intent="timeline" becomes "build a timeline".
+    """
     if analysis.intent == "timeline":
         return "build a timeline"
 
@@ -577,6 +569,12 @@ def describe_intent(analysis: QueryAnalysis) -> str:
 
 
 def extract_score_from_steps(steps: list[TraceStep]) -> str | None:
+    """
+    Pull the context judge score from workflow trace steps.
+
+    Example:
+    A trace detail like "Score 8/10..." returns "8/10".
+    """
     for step in steps:
         if step.name != "Judged context" or not step.detail:
             continue
@@ -589,6 +587,12 @@ def extract_score_from_steps(steps: list[TraceStep]) -> str | None:
 
 
 def extract_relevance_scores_from_steps(steps: list[TraceStep]) -> list[int]:
+    """
+    Collect numeric context judge scores from previous attempts.
+
+    These scores help decide whether a partial briefing or negative-list answer
+    is acceptable after retries.
+    """
     scores = []
 
     for step in steps:
@@ -610,6 +614,13 @@ def build_process_notes(
     source: str,
     reason: str | None = None,
 ) -> list[ProcessNote]:
+    """
+    Build the "how I worked" notes returned with the answer.
+
+    Example:
+    The user can see that the bot planned a query, searched stories, checked
+    source support, and then wrote a cited answer.
+    """
     topic = describe_topic(analysis)
     source_name = display_source_name(source)
 
@@ -636,15 +647,17 @@ def build_process_notes(
         )
 
     if sources:
-        if source == "barandbench":
+        profile = source_profile(source)
+
+        if profile.hydrate_sources_from_postgres:
             source_detail = (
-                f"I found {len(sources)} usable Bar & Bench "
+                f"I found {len(sources)} usable {profile.display_name} "
                 f"{'story' if len(sources) == 1 else 'stories'} and hydrated "
                 "the selected story context from Postgres where possible."
             )
         else:
             source_detail = (
-                f"I found {len(sources)} usable Sakal "
+                f"I found {len(sources)} usable {profile.display_name} "
                 f"{'story' if len(sources) == 1 else 'stories'} from matched chunks "
                 "and merged chunks belonging to the same article where available."
             )
@@ -744,6 +757,13 @@ def build_process_notes(
 
 
 def plan_query(state: ChatState):
+    """
+    First workflow step: understand the user's question.
+
+    Example:
+    "What happened next in this case?" may need chat history.
+    "Find Pune traffic stories" can be searched directly.
+    """
     analysis = analyze_question(
         question=state["question"],
         history=state.get("history", []),
@@ -774,6 +794,14 @@ def plan_query(state: ChatState):
 def route_after_planning(
     state: ChatState,
 ) -> Literal["out_of_scope", "ask_clarification", "retrieve"]:
+    """
+    Decide where the workflow goes after planning.
+
+    Possible next steps:
+    - stop safely,
+    - ask for clarification,
+    - retrieve sources.
+    """
     analysis = require_analysis(state)
 
     if analysis.intent == "out_of_scope":
@@ -786,6 +814,13 @@ def route_after_planning(
 
 
 def out_of_scope(state: ChatState):
+    """
+    Stop when the request is outside the chatbot's job.
+
+    Example:
+    The chatbot can summarize news coverage, but it should not provide legal
+    advice or reveal hidden system prompts.
+    """
     analysis = require_analysis(state)
     message = analysis.refusal_reason or (
         f"This assistant can only answer questions about indexed "
@@ -814,6 +849,12 @@ def out_of_scope(state: ChatState):
 
 
 def ask_clarification(state: ChatState):
+    """
+    Ask the user for more detail when retrieval would be too vague.
+
+    Example:
+    "Tell me about that issue" needs a specific story, topic, or prior context.
+    """
     analysis = require_analysis(state)
     message = analysis.clarification_question or (
         "Could you add a person, case, court, organization, topic, or time period?"
@@ -841,6 +882,14 @@ def ask_clarification(state: ChatState):
 
 
 def retrieve(state: ChatState):
+    """
+    Search the selected news archive and prepare candidate sources.
+
+    This step:
+    - runs hybrid retrieval,
+    - reranks chunks,
+    - turns chunks into answer-ready sources.
+    """
     analysis = require_analysis(state)
     query = state["current_query"] or analysis.search_query
 
@@ -866,11 +915,7 @@ def retrieve(state: ChatState):
 
     selection_detail = source_selection_detail(chunks)
 
-    source_mode = (
-        "Bar & Bench full-article Postgres hydration"
-        if state["source"] == "barandbench"
-        else "Sakal same-story chunk merge"
-    )
+    source_mode = source_profile(state["source"]).retrieval_workflow_detail
 
     return {
         "chunks": chunks,
@@ -893,6 +938,13 @@ def retrieve(state: ChatState):
 
 
 def check_context(state: ChatState):
+    """
+    Check whether the retrieved sources actually answer the question.
+
+    Example:
+    A source about "Pune traffic" is not enough if the user asked about a very
+    specific Hinjewadi helmet campaign.
+    """
     sources = state["sources"]
     analysis = require_analysis(state)
 
@@ -1031,6 +1083,13 @@ def check_context(state: ChatState):
 def route_after_context(
     state: ChatState,
 ) -> Literal["answer", "rewrite_query", "limited_answer"]:
+    """
+    Decide what to do after source-quality checking.
+
+    If sources are strong, answer.
+    If sources are weak but retries remain, rewrite the query.
+    If retries are exhausted, stop with a limited answer.
+    """
     if state["context_enough"]:
         return "answer"
 
@@ -1041,6 +1100,13 @@ def route_after_context(
 
 
 def rewrite_query(state: ChatState):
+    """
+    Create a better search query after weak retrieval results.
+
+    Example:
+    If "teacher recruitment" was too broad, the rewrite may add "Pavitra portal"
+    or another detected entity.
+    """
     analysis = require_analysis(state)
 
     if state.get("suggested_query"):
@@ -1055,6 +1121,10 @@ def rewrite_query(state: ChatState):
                     {
                         "role": "system",
                         "content": QUERY_REWRITE_SYSTEM_PROMPT,
+                    },
+                    {
+                        "role": "system",
+                        "content": query_rewrite_source_prompt(state["source"]),
                     },
                     {
                         "role": "user",
@@ -1093,6 +1163,12 @@ def rewrite_query(state: ChatState):
 
 
 def answer(state: ChatState):
+    """
+    Generate the final answer using only approved sources.
+
+    The answer must cite source numbers like [Source 1]. If citation validation
+    fails, the workflow stops instead of returning an unsupported answer.
+    """
     analysis = require_analysis(state)
     sources = state["sources"]
     context_block = build_context_block(sources)
@@ -1164,6 +1240,13 @@ def answer(state: ChatState):
 
 
 def limited_answer_with_reason(state: ChatState, reason: str):
+    """
+    Return a safe response when the system cannot answer confidently.
+
+    Example:
+    If retrieval fails or the answer has invalid citations, the user gets a
+    limited-answer message instead of a guessed answer.
+    """
     analysis = require_analysis(state)
     safe_reason = trace_detail(reason)
 
@@ -1193,6 +1276,12 @@ def limited_answer_with_reason(state: ChatState, reason: str):
 
 
 def limited_answer(state: ChatState):
+    """
+    Stop after all retrieval attempts are used.
+
+    This keeps the chatbot grounded: no enough source support means no confident
+    answer.
+    """
     return limited_answer_with_reason(
         state,
         "Reached retrieval attempt limit without sufficient context.",

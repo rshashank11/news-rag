@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import re
@@ -11,27 +12,56 @@ from dotenv import load_dotenv
 from pinecone.grpc import PineconeGRPC as Pinecone
 from pinecone_text.sparse import BM25Encoder
 
-from app.openai_client import get_embedding_model, make_sync_embedding_client
+from app.embeddings import embed_texts
+from app.sparse import to_pinecone_sparse_values
 from database import SessionLocal, engine, Base
 from models import StoryMetaData
 
 load_dotenv()
 
-client = make_sync_embedding_client()
 IST = ZoneInfo("Asia/Kolkata")
 
 Base.metadata.create_all(bind=engine)
 
-BM25_ENCODER_PATH = Path(os.environ.get("BM25_ENCODER_PATH", "bm25_values.json"))
-INGEST_CHECKPOINT_PATH = Path(os.environ.get("INGEST_CHECKPOINT_PATH", "ingest_checkpoint.json"))
+DEFAULT_DATA_FILES = [
+    "data/stories-barandbench-1.txt",
+    "data/stories-barandbench-2.txt",
+    "data/stories-barandbench-3.txt",
+    "data/stories-barandbench-4.txt",
+    "data/stories-barandbench-5.txt",
+    "data/stories-barandbench-6.txt",
+    "data/stories-barandbench-7.txt",
+]
+BM25_ENCODER_PATH = Path(
+    os.environ.get("BARANDBENCH_BM25_ENCODER_PATH")
+    or os.environ.get("BM25_ENCODER_PATH", "bm25_barandbench_values.json")
+)
+INGEST_CHECKPOINT_PATH = Path(
+    os.environ.get(
+        "BARANDBENCH_INGEST_CHECKPOINT_PATH",
+        "barandbench_ingest_checkpoint.json",
+    )
+)
 
 
 def clean_html_text(tag) -> str:
+    """
+    Extract readable text from one HTML tag.
+
+    Example:
+    "<p>Hello <b>world</b></p>" becomes "Hello world".
+    """
     text = tag.get_text("", strip=False)
     return re.sub(r"\s+", " ", text).strip()
 
 
 def extract_paragraphs(data: dict) -> list[str]:
+    """
+    Pull paragraph chunks from one Bar & Bench story record.
+
+    Bar & Bench stories arrive as nested cards/elements with HTML inside. This
+    function extracts the article paragraphs that we embed and store.
+    """
     paragraphs = []
 
     for card in data.get("cards", []):
@@ -54,16 +84,33 @@ def extract_paragraphs(data: dict) -> list[str]:
 
 
 def build_full_content(paragraphs: list[str]) -> str:
+    """
+    Join paragraph chunks into the full article body.
+
+    Pinecone stores individual paragraph chunks.
+    Postgres stores the fuller article text for answer generation.
+    """
     return "\n\n".join(paragraphs)
 
 
 def timestamp_ms_to_datetime(value):
+    """
+    Convert a Quintype timestamp into a Python datetime.
+
+    Quintype timestamps are milliseconds since Unix epoch.
+    """
     if value is None:
         return None
     return datetime.fromtimestamp(int(value) / 1000, tz=IST)
 
 
 def timestamp_ms_to_date_string(value) -> str | None:
+    """
+    Convert a Quintype timestamp into a YYYY-MM-DD date string.
+
+    Example:
+    1775000000000 becomes something like "2026-04-01".
+    """
     published_at = timestamp_ms_to_datetime(value)
     if published_at is None:
         return None
@@ -71,6 +118,12 @@ def timestamp_ms_to_date_string(value) -> str | None:
 
 
 def date_string_to_yyyymmdd(value: str | None) -> int | None:
+    """
+    Convert a date string into Pinecone's numeric date format.
+
+    Example:
+    "2026-04-01" becomes 20260401.
+    """
     if value is None:
         return None
 
@@ -78,6 +131,12 @@ def date_string_to_yyyymmdd(value: str | None) -> int | None:
 
 
 def normalized_metadata_values(values: list[str]) -> list[str]:
+    """
+    Lowercase and dedupe topic/category values.
+
+    Example:
+    [" Supreme Court ", "supreme court"] becomes ["supreme court"].
+    """
     normalized_values = []
     seen = set()
 
@@ -92,6 +151,12 @@ def normalized_metadata_values(values: list[str]) -> list[str]:
 
 
 def extract_tag_names(data: dict) -> list[str]:
+    """
+    Extract topic/tag names from one story record.
+
+    Example:
+    Tags may include courts, statutes, legal topics, or people.
+    """
     return [
         tag.get("name")
         for tag in data.get("tags", [])
@@ -100,6 +165,12 @@ def extract_tag_names(data: dict) -> list[str]:
 
 
 def extract_category_names(data: dict) -> list[str]:
+    """
+    Extract section/category names from one story record.
+
+    Example:
+    Categories may include "Litigation", "Corporate", or similar sections.
+    """
     return [
         section.get("name")
         for section in data.get("sections", [])
@@ -107,22 +178,20 @@ def extract_category_names(data: dict) -> list[str]:
     ]
 
 
-def embed_texts(texts: list[str]) -> list[list[float]]:
-    response = client.embeddings.create(
-        model=get_embedding_model(),
-        input=texts
+def load_checkpoint() -> dict | None:
+    """
+    Load the last saved ingestion position.
+
+    Example:
+    If ingestion stopped at stories-barandbench-3.txt line 2000, the next run can
+    continue after that line instead of starting over.
+    """
+    ignore_checkpoint = (
+        os.environ.get("BARANDBENCH_INGEST_IGNORE_CHECKPOINT")
+        or os.environ.get("INGEST_IGNORE_CHECKPOINT", "")
     )
 
-    sorted_items = sorted(response.data, key=lambda item: item.index)
-
-    return [
-        item.embedding
-        for item in sorted_items
-    ]
-
-
-def load_checkpoint() -> dict | None:
-    if os.environ.get("INGEST_IGNORE_CHECKPOINT", "").lower() == "true":
+    if ignore_checkpoint.lower() == "true":
         return None
 
     if not INGEST_CHECKPOINT_PATH.exists():
@@ -133,14 +202,30 @@ def load_checkpoint() -> dict | None:
 
 
 def checkpoint_from_env() -> dict | None:
-    start_file = os.environ.get("INGEST_START_FILE")
-    start_line = os.environ.get("INGEST_START_LINE")
+    """
+    Build a manual resume point from environment variables.
+
+    Example:
+    BARANDBENCH_INGEST_START_FILE and BARANDBENCH_INGEST_START_LINE let an
+    engineer restart from a known dump position.
+    """
+    start_file = (
+        os.environ.get("BARANDBENCH_INGEST_START_FILE")
+        or os.environ.get("INGEST_START_FILE")
+    )
+    start_line = (
+        os.environ.get("BARANDBENCH_INGEST_START_LINE")
+        or os.environ.get("INGEST_START_LINE")
+    )
 
     if not start_file and not start_line:
         return None
 
     if not start_file or not start_line:
-        raise RuntimeError("Both INGEST_START_FILE and INGEST_START_LINE must be set to resume manually.")
+        raise RuntimeError(
+            "Both BARANDBENCH_INGEST_START_FILE and "
+            "BARANDBENCH_INGEST_START_LINE must be set to resume manually."
+        )
 
     return {
         "file": Path(start_file).name,
@@ -149,10 +234,20 @@ def checkpoint_from_env() -> dict | None:
 
 
 def get_resume_checkpoint() -> dict | None:
+    """
+    Choose the checkpoint used for this ingestion run.
+
+    Manual environment settings win over the saved checkpoint file.
+    """
     return checkpoint_from_env() or load_checkpoint()
 
 
 def should_skip_for_checkpoint(path: Path, line_number: int, checkpoint: dict | None) -> bool:
+    """
+    Decide whether a dump line is before the resume point.
+
+    This prevents re-uploading chunks that were already flushed successfully.
+    """
     if not checkpoint:
         return False
 
@@ -172,6 +267,11 @@ def should_skip_for_checkpoint(path: Path, line_number: int, checkpoint: dict | 
 
 
 def save_checkpoint(path: str, line_number: int):
+    """
+    Save the latest safely uploaded dump position.
+
+    The checkpoint is written after Pinecone upsert so retries do not skip data.
+    """
     checkpoint = {
         "file": Path(path).name,
         "path": path,
@@ -185,6 +285,12 @@ def save_checkpoint(path: str, line_number: int):
 
 
 def iter_story_data(file_paths: list[str], checkpoint: dict | None = None):
+    """
+    Read story dump lines as JSON records.
+
+    Each non-empty line is one story. Checkpoint logic skips lines already
+    processed by a previous run.
+    """
     for file_path in file_paths:
         path = Path(file_path)
 
@@ -200,6 +306,12 @@ def iter_story_data(file_paths: list[str], checkpoint: dict | None = None):
 
 
 def build_bm25_encoder(file_paths: list[str]) -> BM25Encoder:
+    """
+    Load or create the Bar & Bench BM25 keyword-search encoder.
+
+    BM25 learns the Bar & Bench paragraph vocabulary, so exact legal terms like
+    "PMLA", "NCLT", or "bail" can match strongly.
+    """
     if BM25_ENCODER_PATH.exists():
         print(f"Loading BM25 encoder from {BM25_ENCODER_PATH}")
         return BM25Encoder().load(str(BM25_ENCODER_PATH))
@@ -214,9 +326,6 @@ def build_bm25_encoder(file_paths: list[str]) -> BM25Encoder:
         raise RuntimeError("Cannot fit BM25 encoder because no paragraphs were found.")
 
     bm25_encoder = BM25Encoder().default()
-    # which words exist
-    # how common each word is
-    # how important rare words should be
     bm25_encoder.fit(corpus)
 
     BM25_ENCODER_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -226,27 +335,23 @@ def build_bm25_encoder(file_paths: list[str]) -> BM25Encoder:
     return bm25_encoder
 
 
-def to_pinecone_sparse_values(sparse_vector: dict) -> dict:
-    """{
-    "indices": [123, 456],
-    "values": [0.8, 1.2]
-    }
-    
-    token 123 has weight 0.8
-    token 456 has weight 1.2
-
-    """
-    return {
-        "indices": [int(index) for index in sparse_vector["indices"]],
-        "values": [float(value) for value in sparse_vector["values"]],
-    }
-
-
 def has_sparse_values(sparse_vector: dict) -> bool:
+    """
+    Check whether BM25 found any keyword signal for a chunk.
+
+    Empty sparse vectors are skipped because Pinecone expects meaningful indices
+    and values.
+    """
     return bool(sparse_vector["indices"]) and bool(sparse_vector["values"])
 
 
 def flush_stories(db, pending_stories):
+    """
+    Save pending full-story rows to Postgres.
+
+    Postgres is used later to hydrate full Bar & Bench article context after
+    Pinecone finds matching story IDs.
+    """
     if not pending_stories:
         return
 
@@ -256,6 +361,14 @@ def flush_stories(db, pending_stories):
 
 
 def flush_chunks(index, namespace, pending_chunks, bm25_encoder):
+    """
+    Embed pending paragraph chunks and upload them to Pinecone.
+
+    Each paragraph chunk gets:
+    - dense embedding for meaning,
+    - sparse BM25 vector for keywords,
+    - metadata for dates, headline, topics, and categories.
+    """
     if not pending_chunks:
         return
 
@@ -278,7 +391,6 @@ def flush_chunks(index, namespace, pending_chunks, bm25_encoder):
 
         vectors = []
 
-        # zip lets us walk through three lists side by side
         for chunk, embedding, sparse_vector in zip(batch, embeddings, sparse_vectors):
             vector = {
                 "id": chunk["chunk_id"],
@@ -311,12 +423,35 @@ def flush_chunks(index, namespace, pending_chunks, bm25_encoder):
 
 
 def ingest_files(file_paths: list[str]):
+    """
+    Run the full Bar & Bench ingestion pipeline.
+
+    What happens:
+    1. read story dump files,
+    2. save full story text to Postgres,
+    3. embed paragraph chunks,
+    4. upload paragraph vectors to Pinecone.
+    """
     db = SessionLocal()
 
     pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
-    index = pc.Index(host=os.environ.get("PINECONE_INDEX_HOST"))
+    index_host = (
+        os.environ.get("BARANDBENCH_PINECONE_INDEX_HOST")
+        or os.environ.get("PINECONE_INDEX_HOST")
+    )
 
-    namespace = os.environ.get("PINECONE_NAMESPACE")
+    if not index_host:
+        raise RuntimeError(
+            "BARANDBENCH_PINECONE_INDEX_HOST or PINECONE_INDEX_HOST is missing."
+        )
+
+    index = pc.Index(host=index_host)
+
+    namespace = (
+        os.environ.get("BARANDBENCH_PINECONE_NAMESPACE")
+        or os.environ.get("PINECONE_NAMESPACE")
+        or "barandbench"
+    )
     bm25_encoder = build_bm25_encoder(file_paths)
     checkpoint = get_resume_checkpoint()
     pending_stories = []
@@ -401,15 +536,26 @@ def ingest_files(file_paths: list[str]):
         db.close()
 
 
-if __name__ == "__main__":
-    ingest_files(
-        [
-            "data/stories-barandbench-1.txt",
-            "data/stories-barandbench-2.txt",
-            "data/stories-barandbench-3.txt",
-            "data/stories-barandbench-4.txt",
-            "data/stories-barandbench-5.txt",
-            "data/stories-barandbench-6.txt",
-            "data/stories-barandbench-7.txt",
-        ]
+def parse_args():
+    """
+    Parse command-line arguments for Bar & Bench ingestion.
+
+    Example:
+    python ingest_barandbench.py data/stories-barandbench-1.txt
+    ingests only that file.
+    """
+    parser = argparse.ArgumentParser(
+        description="Ingest Bar & Bench story dumps into Postgres and Pinecone."
     )
+    parser.add_argument(
+        "files",
+        nargs="*",
+        default=DEFAULT_DATA_FILES,
+        help="Story dump files to ingest.",
+    )
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    ingest_files(args.files)

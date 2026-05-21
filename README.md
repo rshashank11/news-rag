@@ -29,10 +29,14 @@ The hosted app expects these runtime secrets:
 - `SAKAL_PINECONE_NAMESPACE`
 - `SAKAL_BM25_ENCODER_PATH`
 
+Use `.env.example` as a safe template for local setup. Do not commit real `.env`
+values.
+
 Optional search settings:
 
 - `PINECONE_NAMESPACE` defaults to `default`
-- `BM25_ENCODER_PATH` defaults to `bm25_sakal_values.json`
+- `BARANDBENCH_BM25_ENCODER_PATH` defaults to `bm25_barandbench_values.json`
+- `SAKAL_BM25_ENCODER_PATH` defaults to `bm25_sakal_values.json`
 
 For direct OpenAI, set:
 
@@ -51,3 +55,10 @@ For Azure OpenAI, set:
 - `AZURE_OPENAI_CHAT_DEPLOYMENT`
 
 Ingestion is not run on the hosted app. The hosted app only queries existing Pinecone indexes and source-specific BM25 encoder files.
+
+## Ingestion Scripts
+
+- `convert_sakal_xml_to_json.py` converts Sakal XML files into `sakal.json`.
+- `ingest_sakal.py` embeds Sakal article chunks and uploads dense plus BM25 sparse vectors to Pinecone.
+- `ingest_barandbench.py` ingests Bar & Bench story dumps into Postgres and Pinecone.
+- `backfill_barandbench_pinecone_published_at.py` backfills Bar & Bench Pinecone metadata for existing chunks.

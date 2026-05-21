@@ -26,11 +26,23 @@ DEFAULT_DATA_FILES = [
 
 
 def clean_html_text(tag) -> str:
+    """
+    Extract readable text from one HTML tag.
+
+    This must match ingest_barandbench.py so chunk indexes stay aligned.
+    """
     text = tag.get_text("", strip=False)
     return re.sub(r"\s+", " ", text).strip()
 
 
 def extract_paragraphs(data: dict) -> list[str]:
+    """
+    Extract paragraph chunks from a Bar & Bench dump record.
+
+    Example:
+    If ingestion created vectors story_id-0, story_id-1, story_id-2, this
+    function must produce the same paragraph order for backfill updates.
+    """
     paragraphs = []
 
     for card in data.get("cards", []):
@@ -50,6 +62,9 @@ def extract_paragraphs(data: dict) -> list[str]:
 
 
 def timestamp_ms_to_date_string(value) -> str | None:
+    """
+    Convert a Quintype millisecond timestamp into YYYY-MM-DD.
+    """
     if value is None:
         return None
 
@@ -58,6 +73,12 @@ def timestamp_ms_to_date_string(value) -> str | None:
 
 
 def date_string_to_yyyymmdd(value: str | None) -> int | None:
+    """
+    Convert a date string into Pinecone's numeric date field.
+
+    Example:
+    "2026-04-01" becomes 20260401.
+    """
     if value is None:
         return None
 
@@ -65,6 +86,12 @@ def date_string_to_yyyymmdd(value: str | None) -> int | None:
 
 
 def normalized_metadata_values(values: list[str]) -> list[str]:
+    """
+    Lowercase and dedupe topic/category metadata.
+
+    Example:
+    ["PMLA", " pmla "] becomes ["pmla"].
+    """
     normalized_values = []
     seen = set()
 
@@ -79,6 +106,9 @@ def normalized_metadata_values(values: list[str]) -> list[str]:
 
 
 def extract_tag_names(data: dict) -> list[str]:
+    """
+    Extract topic/tag names from one story dump record.
+    """
     return [
         tag.get("name")
         for tag in data.get("tags", [])
@@ -87,6 +117,9 @@ def extract_tag_names(data: dict) -> list[str]:
 
 
 def extract_category_names(data: dict) -> list[str]:
+    """
+    Extract category/section names from one story dump record.
+    """
     return [
         section.get("name")
         for section in data.get("sections", [])
@@ -95,6 +128,13 @@ def extract_category_names(data: dict) -> list[str]:
 
 
 def iter_metadata_updates(file_paths: list[str]):
+    """
+    Prepare Pinecone metadata updates from Bar & Bench dump files.
+
+    Important:
+    Vector IDs must match ingestion exactly:
+    story UUID + "-" + paragraph index.
+    """
     for file_path in file_paths:
         path = Path(file_path)
 
@@ -131,6 +171,11 @@ def iter_metadata_updates(file_paths: list[str]):
 
 
 def update_metadata(index, namespace: str, update: dict, retries: int):
+    """
+    Update one Pinecone vector's metadata.
+
+    Retries help with temporary network or Pinecone errors during large backfills.
+    """
     for attempt in range(1, retries + 1):
         try:
             index.update(
@@ -155,6 +200,12 @@ def process_update_batch(
     completed: int,
     failed: int,
 ) -> tuple[int, int]:
+    """
+    Update many Pinecone vectors in parallel.
+
+    Example:
+    workers=16 means up to 16 metadata updates can run at the same time.
+    """
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = [
             executor.submit(update_metadata, index, namespace, update, retries)
@@ -188,6 +239,12 @@ def run_backfill(
     start_at: int,
     retries: int,
 ):
+    """
+    Run the Bar & Bench Pinecone metadata backfill.
+
+    Use this when old vectors already exist in Pinecone but need newer metadata,
+    such as published_at_yyyymmdd for date filtering.
+    """
     if dry_run:
         prepared = 0
 
@@ -206,14 +263,23 @@ def run_backfill(
     load_dotenv()
 
     api_key = os.environ.get("PINECONE_API_KEY")
-    index_host = os.environ.get("PINECONE_INDEX_HOST")
-    namespace = os.environ.get("PINECONE_NAMESPACE", "default")
+    index_host = (
+        os.environ.get("BARANDBENCH_PINECONE_INDEX_HOST")
+        or os.environ.get("PINECONE_INDEX_HOST")
+    )
+    namespace = (
+        os.environ.get("BARANDBENCH_PINECONE_NAMESPACE")
+        or os.environ.get("PINECONE_NAMESPACE")
+        or "barandbench"
+    )
 
     if not api_key:
         raise RuntimeError("PINECONE_API_KEY is missing.")
 
     if not index_host:
-        raise RuntimeError("PINECONE_INDEX_HOST is missing.")
+        raise RuntimeError(
+            "BARANDBENCH_PINECONE_INDEX_HOST or PINECONE_INDEX_HOST is missing."
+        )
 
     pc = Pinecone(api_key=api_key)
     index = pc.Index(host=index_host)
@@ -264,6 +330,13 @@ def run_backfill(
 
 
 def parse_args():
+    """
+    Parse command-line options for the metadata backfill script.
+
+    Example:
+    python backfill_barandbench_pinecone_published_at.py --dry-run --limit 10
+    previews the first 10 updates without writing to Pinecone.
+    """
     parser = argparse.ArgumentParser(
         description="Backfill published_at metadata onto existing Pinecone chunks."
     )

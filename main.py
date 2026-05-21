@@ -25,6 +25,13 @@ def build_initial_state(
     history: list[ChatMessage],
     source: str,
 ) -> dict:
+    """
+    Create the starting data object for one chat request.
+
+    Example:
+    At the beginning, there are no retrieved chunks, no sources, and no answer.
+    The workflow fills those fields step by step.
+    """
     return {
         "question": question,
         "source": source,
@@ -43,6 +50,12 @@ def build_initial_state(
 
 @app.get("/")
 def read_root():
+    """
+    Serve the local HTML app if it exists.
+
+    If app.html is missing, return a small API placeholder so the root URL still
+    shows something useful.
+    """
     frontend_path = Path("app.html")
 
     if frontend_path.exists():
@@ -69,11 +82,22 @@ def read_root():
 
 @app.get("/health")
 def health_check():
+    """
+    Return a simple health check response.
+
+    Hosting tools can call this to confirm the API process is alive.
+    """
     return {"status": "ok"}
 
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
+    """
+    Run the full chatbot workflow in one blocking request.
+
+    This endpoint waits until planning, retrieval, source checking, and answer
+    generation are complete, then returns the final ChatResponse.
+    """
     start_time = time.perf_counter()
 
     try:
@@ -100,10 +124,24 @@ def chat(request: ChatRequest):
 
 
 def sse_payload(kind: str, payload: dict) -> str:
+    """
+    Format one Server-Sent Event message.
+
+    Example:
+    kind="process" streams progress notes.
+    kind="final" streams the completed answer.
+    """
     return f"data: {json.dumps({'kind': kind, **payload}, default=str)}\n\n"
 
 
 def describe_topic(analysis: QueryAnalysis) -> str:
+    """
+    Pick a short topic label for progress notes.
+
+    Example:
+    If entities are ["Pune", "Market Yard"], show those instead of the full
+    search query.
+    """
     if analysis.entities:
         return ", ".join(analysis.entities[:4])
 
@@ -111,6 +149,12 @@ def describe_topic(analysis: QueryAnalysis) -> str:
 
 
 def describe_intent(analysis: QueryAnalysis) -> str:
+    """
+    Convert internal intent into user-friendly wording.
+
+    Example:
+    intent="timeline" becomes "build a timeline".
+    """
     if analysis.intent == "timeline":
         return "build a timeline"
 
@@ -121,6 +165,12 @@ def describe_intent(analysis: QueryAnalysis) -> str:
 
 
 def process_sources(sources: list[NewsSource]) -> list[dict]:
+    """
+    Keep streamed source previews small.
+
+    The frontend only needs source number, article ID, and headline while the
+    workflow is still running.
+    """
     return [
         {
             "source_number": source.source_number,
@@ -132,6 +182,13 @@ def process_sources(sources: list[NewsSource]) -> list[dict]:
 
 
 def latest_step_detail(steps: list[TraceStep], name: str) -> str | None:
+    """
+    Find the latest detail for a workflow step.
+
+    Example:
+    The context checker may run more than once after query rewrites. We want the
+    newest "Judged context" detail.
+    """
     for step in reversed(steps):
         if step.name == name:
             return step.detail
@@ -145,6 +202,12 @@ def stream_note(
     source_numbers: list[int] | None = None,
     sources: list[NewsSource] | None = None,
 ) -> str:
+    """
+    Build a streamed progress-note event.
+
+    Example:
+    The user can see "Reviewing news stories" before the final answer arrives.
+    """
     return sse_payload(
         "process",
         {
@@ -163,6 +226,11 @@ def make_process_note(
     detail: str,
     source_numbers: list[int] | None = None,
 ) -> ProcessNote:
+    """
+    Create a ProcessNote and keep its text within schema limits.
+
+    Process notes are shown to users, so we keep them short and stable.
+    """
     return ProcessNote(
         title=title,
         detail=detail[:700],
@@ -174,6 +242,13 @@ def process_note_for_node(
     node_name: str,
     update: dict,
 ) -> tuple[ProcessNote | None, list[NewsSource]]:
+    """
+    Convert a workflow update into a user-visible progress note.
+
+    Example:
+    When the retrieve node finishes, this returns a "Reviewing news stories"
+    note plus the sources found so far.
+    """
     analysis = update.get("analysis")
     sources = update.get("sources") or []
     steps = update.get("steps") or []
@@ -263,6 +338,12 @@ def process_note_for_node(
 
 
 def process_event_for_node(node_name: str, update: dict) -> str | None:
+    """
+    Convert one workflow update into an SSE event if users should see it.
+
+    Some internal updates are skipped because they are not useful as progress
+    messages.
+    """
     note, sources = process_note_for_node(node_name, update)
 
     if note is None:
@@ -278,7 +359,18 @@ def process_event_for_node(node_name: str, update: dict) -> str | None:
 
 @app.post("/chat/stream")
 def chat_stream(request: ChatRequest):
+    """
+    Run the chatbot workflow as a streaming endpoint.
+
+    The client receives progress events first, then one final answer event.
+    """
     def event_stream():
+        """
+        Yield Server-Sent Events while the graph runs.
+
+        This lets the frontend show work-in-progress messages instead of waiting
+        silently for the final answer.
+        """
         start_time = time.perf_counter()
 
         try:

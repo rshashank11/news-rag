@@ -2,12 +2,33 @@ import requests
 
 from app.config import settings
 from app.embeddings import embed_text
+from app.news_sources import source_profile
 from app.sparse import encode_sparse_query
 from app.vectorstore import hybrid_query
 from schemas import RetrievedChunk, clean_text
 
 
+def runtime_source_profile(source: str | None):
+    """
+    Get the metadata rules for the selected source.
+
+    Example:
+    Sakal stores dates in "date_published".
+    Bar & Bench stores dates in "published_at".
+    This profile tells retrieval which field to read.
+    """
+    source_name = settings.news_source_config(source)["source"]
+    return source_profile(source_name)
+
+
 def clamp_top_k(top_k: int | None) -> int:
+    """
+    Keep requested result count inside safe limits.
+
+    Example:
+    If a user asks for 500 results but max_retrieval_top_k is 80,
+    this function caps it at 80.
+    """
     requested_top_k = settings.retrieval_top_k if top_k is None else top_k
     return min(
         max(requested_top_k, settings.min_retrieval_top_k),
@@ -16,6 +37,12 @@ def clamp_top_k(top_k: int | None) -> int:
 
 
 def iso_date_to_yyyymmdd(value: str | None) -> int | None:
+    """
+    Convert a date string into the number format stored in Pinecone.
+
+    Example:
+    "2026-04-01" becomes 20260401.
+    """
     if value is None:
         return None
 
@@ -27,6 +54,13 @@ def build_pinecone_date_filter(
     to_date: str | None = None,
     source: str | None = None,
 ) -> dict | None:
+    """
+    Build the date filter sent to Pinecone.
+
+    Example:
+    from_date="2026-04-01" creates a "$gte" filter.
+    to_date="2026-04-30" creates a "$lte" filter.
+    """
     date_filter = {}
 
     from_date_number = iso_date_to_yyyymmdd(from_date)
@@ -41,17 +75,18 @@ def build_pinecone_date_filter(
     if not date_filter:
         return None
 
-    source_name = settings.news_source_config(source)["source"]
-    date_field = (
-        "published_at_yyyymmdd"
-        if source_name == "barandbench"
-        else "date_published_yyyymmdd"
-    )
+    date_field = runtime_source_profile(source).date_filter_field
 
     return {date_field: date_filter}
 
 
 def get_match_value(match, name: str, default=None):
+    """
+    Read a value from a Pinecone match.
+
+    Pinecone responses may behave like objects or dictionaries depending on the
+    SDK path used. This function handles both shapes.
+    """
     if isinstance(match, dict):
         return match.get(name, default)
 
@@ -59,6 +94,13 @@ def get_match_value(match, name: str, default=None):
 
 
 def get_match_metadata(match) -> dict:
+    """
+    Convert Pinecone metadata into a normal Python dictionary.
+
+    Example:
+    Some SDK objects expose metadata.to_dict().
+    Our app code wants a plain dict either way.
+    """
     metadata = get_match_value(match, "metadata", {}) or {}
 
     if hasattr(metadata, "to_dict"):
@@ -68,6 +110,12 @@ def get_match_metadata(match) -> dict:
 
 
 def get_match_score(match) -> float | None:
+    """
+    Read the Pinecone similarity score as a float.
+
+    The score becomes retrieval_score on RetrievedChunk and can be used as a
+    fallback ranking signal.
+    """
     score = get_match_value(match, "score")
 
     if score is None:
@@ -80,6 +128,13 @@ def get_match_score(match) -> float | None:
 
 
 def list_metadata_values(value) -> list[str]:
+    """
+    Convert metadata into a clean list of strings.
+
+    Example:
+    "Pune" becomes ["Pune"].
+    [" Pune ", "", "Traffic"] becomes ["Pune", "Traffic"].
+    """
     if not value:
         return []
 
@@ -107,6 +162,12 @@ def document_matches_date_filter(
     from_date: str | None = None,
     to_date: str | None = None,
 ) -> bool:
+    """
+    Check whether one retrieved chunk is inside the requested date window.
+
+    Pinecone normally handles this filter. We also check locally as a safety net,
+    especially during index rebuilds or fallback searches.
+    """
     published_at = getattr(chunk, "published_at", None)
 
     if not published_at:
@@ -121,54 +182,51 @@ def document_matches_date_filter(
     return True
 
 
-def expand_sakal_english_query(query: str, source: str | None = None) -> str:
-    # Query translation and expansion belongs in the LLM planner. Retrieval
-    # should execute the planner's search_query without source-specific term maps.
-    return query
-
-
 def metadata_categories_for_source(
     metadata: dict,
     source: str | None,
 ) -> list[str]:
-    source_name = settings.news_source_config(source)["source"]
+    """
+    Read category fields using the selected source's metadata rules.
 
-    if source_name == "barandbench":
-        return list_metadata_values(metadata.get("categories"))
+    Example:
+    Bar & Bench uses "categories".
+    Sakal combines "edition", "source", and "location".
+    """
+    profile = runtime_source_profile(source)
+    values = [
+        metadata.get(field_name)
+        for field_name in profile.category_metadata_fields
+    ]
 
-    return list_metadata_values(
-        [
-            metadata.get("edition"),
-            metadata.get("source"),
-            metadata.get("location"),
-        ]
-    )
+    if len(values) == 1:
+        return list_metadata_values(values[0])
+
+    return list_metadata_values(values)
 
 
 def format_match(match, source: str | None = None) -> RetrievedChunk | None:
+    """
+    Convert one Pinecone result into the app's RetrievedChunk object.
+
+    Pinecone gives us raw metadata.
+    The workflow expects a consistent object with story_id, headline, date,
+    topics, categories, score, and chunk text.
+    """
     metadata = get_match_metadata(match)
     chunk_text = metadata.get("chunk_text")
-    source_name = settings.news_source_config(source)["source"]
+    profile = runtime_source_profile(source)
 
     if not chunk_text:
         return None
 
-    if source_name == "barandbench":
-        story_id = metadata.get("story_id")
-        published_at = metadata.get("published_at")
-        topics = list_metadata_values(metadata.get("topics"))
-    else:
-        story_id = metadata.get("article_id")
-        published_at = metadata.get("date_published")
-        topics = list_metadata_values(metadata.get("keywords"))
-
     return RetrievedChunk(
         id=str(get_match_value(match, "id", "")),
-        story_id=story_id,
+        story_id=metadata.get(profile.id_metadata_field),
         chunk_index=metadata.get("chunk_index"),
         headline=metadata.get("headline") or "Untitled",
-        published_at=published_at,
-        topics=topics,
+        published_at=metadata.get(profile.published_at_metadata_field),
+        topics=list_metadata_values(metadata.get(profile.topics_metadata_field)),
         categories=metadata_categories_for_source(metadata, source),
         retrieval_score=get_match_score(match),
         chunk_text=chunk_text,
@@ -176,6 +234,12 @@ def format_match(match, source: str | None = None) -> RetrievedChunk | None:
 
 
 def dedupe_chunks(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
+    """
+    Remove duplicate chunks while keeping the first/highest-ranked copy.
+
+    Example:
+    If Pinecone returns the same chunk twice, the answer model should see it once.
+    """
     seen_ids = set()
     unique_chunks = []
 
@@ -189,111 +253,23 @@ def dedupe_chunks(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
     return unique_chunks
 
 
-# -------------------------------------------------------------------
-# OLD CUSTOM RERANKER - COMMENTED OUT
-# -------------------------------------------------------------------
-# We are no longer actively using this heuristic reranker.
-#
-# It used:
-# - Pinecone vector/hybrid score
-# - headline keyword overlap
-# - metadata keyword overlap
-# - chunk text keyword overlap
-# - date recency
-# - same-story evidence bonus
-#
-# We are replacing that active reranking logic with Jina reranker below.
-#
-# from datetime import date
-#
-#
-# def token_set(text: str) -> set[str]:
-#     min_length = settings.rerank_min_token_length
-#
-#     return {
-#         token
-#         for token in TOKEN_PATTERN.findall(text.lower())
-#         if len(token) >= min_length and token not in STOPWORDS
-#     }
-#
-#
-# def overlap_ratio(query_tokens: set[str], text: str) -> float:
-#     if not query_tokens:
-#         return 0.0
-#
-#     text_tokens = token_set(text)
-#
-#     if not text_tokens:
-#         return 0.0
-#
-#     return len(query_tokens & text_tokens) / len(query_tokens)
-#
-#
-# def parse_chunk_date(chunk: RetrievedChunk) -> date | None:
-#     if not chunk.published_at:
-#         return None
-#
-#     try:
-#         return date.fromisoformat(chunk.published_at)
-#     except ValueError:
-#         return None
-#
-#
-# def normalize_float(value: float | None, minimum: float, maximum: float) -> float:
-#     if value is None:
-#         return 0.0
-#
-#     if maximum <= minimum:
-#         return 1.0
-#
-#     return (value - minimum) / (maximum - minimum)
-#
-#
-# def normalize_chunk_date(
-#     chunk_date: date | None,
-#     earliest_date: date | None,
-#     latest_date: date | None,
-# ) -> float:
-#     if chunk_date is None or earliest_date is None or latest_date is None:
-#         return 0.0
-#
-#     total_days = (latest_date - earliest_date).days
-#
-#     if total_days <= 0:
-#         return 0.0
-#
-#     return (chunk_date - earliest_date).days / total_days
-#
-#
-# def rerank_chunk(
-#     chunk: RetrievedChunk,
-#     query_tokens: set[str],
-#     normalized_vector_score: float,
-#     normalized_date_score: float,
-# ) -> RetrievedChunk:
-#     metadata_text = " ".join([*chunk.topics, *chunk.categories])
-#
-#     rerank_score = (
-#         normalized_vector_score * settings.rerank_vector_score_weight
-#         + overlap_ratio(query_tokens, chunk.headline) * settings.rerank_headline_overlap_weight
-#         + overlap_ratio(query_tokens, metadata_text) * settings.rerank_metadata_overlap_weight
-#         + overlap_ratio(query_tokens, chunk.chunk_text) * settings.rerank_chunk_overlap_weight
-#         + normalized_date_score * settings.rerank_date_score_weight
-#     )
-#
-#     return chunk.model_copy(update={"rerank_score": round(rerank_score, 6)})
-
-
-# -------------------------------------------------------------------
-# JINA RERANKER
-# -------------------------------------------------------------------
-
-
 def story_key(chunk: RetrievedChunk) -> str:
+    """
+    Return the ID used to group chunks from the same story.
+
+    Example:
+    Three chunks from one Sakal article should share the same story_key.
+    """
     return chunk.story_id or chunk.id
 
 
 def chunk_to_jina_document(chunk: RetrievedChunk) -> str:
+    """
+    Format a retrieved chunk for the optional Jina reranker.
+
+    The reranker sees headline, date, metadata, and text together so it can judge
+    relevance more accurately than using body text alone.
+    """
     metadata_text = " ".join([*chunk.topics, *chunk.categories])
 
     return "\n".join(
@@ -310,6 +286,13 @@ def call_jina_reranker(
     query: str,
     chunks: list[RetrievedChunk],
 ) -> list[tuple[RetrievedChunk, float]]:
+    """
+    Ask Jina to rerank retrieved chunks by relevance to the query.
+
+    Example:
+    Pinecone may return 30 candidate chunks.
+    Jina can reorder them so the most answer-worthy chunks rise to the top.
+    """
     if not chunks:
         return []
 
@@ -372,6 +355,13 @@ def call_jina_reranker(
 def build_retrieval_score_ranked_chunks(
     chunks: list[RetrievedChunk],
 ) -> list[RetrievedChunk]:
+    """
+    Use Pinecone's original score when no external reranker is active.
+
+    Example:
+    If RERANK_MODE="none", we still attach rerank_score so downstream code can
+    use one common ranking field.
+    """
     return [
         chunk.model_copy(
             update={
@@ -386,6 +376,14 @@ def rerank_chunks_by_story(
     query: str,
     chunks: list[RetrievedChunk],
 ) -> list[RetrievedChunk]:
+    """
+    Rank chunks while avoiding too many chunks from one story.
+
+    Example:
+    If one article has 6 matching chunks and another article has 1 strong chunk,
+    we do not want the first article to crowd out everything else. Grouping by
+    story helps the answer model see a better spread of sources.
+    """
     if not chunks:
         return []
 
@@ -480,8 +478,17 @@ def retrieve_chunks(
     to_date: str | None = None,
     source: str | None = None,
 ) -> list[RetrievedChunk]:
+    """
+    Retrieve the best matching news chunks for one planned search query.
+
+    Full flow:
+    1. embed the query for meaning-based search,
+    2. encode the query for keyword/BM25 search,
+    3. send both to Pinecone as a hybrid query,
+    4. format and rerank the returned chunks.
+    """
     cleaned_query = clean_text(query)
-    retrieval_query = expand_sakal_english_query(cleaned_query, source=source)
+    retrieval_query = cleaned_query
 
     if not cleaned_query:
         raise ValueError("Search query cannot be empty.")

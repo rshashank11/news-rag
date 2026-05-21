@@ -5,13 +5,60 @@ from app.agents.workflow import (
     answer_system_prompt_for_source,
     response_language_for_question,
 )
+from app.agents.prompts import planner_source_prompt, query_rewrite_source_prompt
 from app.config import settings
 from app.retrieval import (
-    expand_sakal_english_query,
+    build_pinecone_date_filter,
+    format_match,
     rerank_chunks_by_story,
     retrieve_chunks,
 )
 from schemas import RetrievedChunk
+
+
+class SourceProfileTests(unittest.TestCase):
+    def test_barandbench_prompts_do_not_include_sakal_rewrite_rules(self) -> None:
+        planner_prompt = planner_source_prompt("barandbench")
+        rewrite_prompt = query_rewrite_source_prompt("barandbench")
+
+        self.assertIn("English legal news", planner_prompt)
+        self.assertIn("Keep the rewritten query in English", rewrite_prompt)
+        self.assertNotIn("Marathi retrieval", planner_prompt)
+        self.assertNotIn("Marathi retrieval", rewrite_prompt)
+
+    def test_source_specific_date_filter_fields(self) -> None:
+        self.assertEqual(
+            build_pinecone_date_filter("2026-04-01", source="sakal"),
+            {"date_published_yyyymmdd": {"$gte": 20260401}},
+        )
+        self.assertEqual(
+            build_pinecone_date_filter("2026-04-01", source="barandbench"),
+            {"published_at_yyyymmdd": {"$gte": 20260401}},
+        )
+
+    def test_barandbench_match_uses_story_metadata_fields(self) -> None:
+        chunk = format_match(
+            {
+                "id": "story-1-0",
+                "score": 0.9,
+                "metadata": {
+                    "story_id": "story-1",
+                    "chunk_index": 0,
+                    "headline": "Court grants bail",
+                    "published_at": "2026-04-01",
+                    "topics": ["PMLA"],
+                    "categories": ["Litigation"],
+                    "chunk_text": "The High Court granted bail in a PMLA case.",
+                },
+            },
+            source="barandbench",
+        )
+
+        self.assertIsNotNone(chunk)
+        self.assertEqual(chunk.story_id, "story-1")
+        self.assertEqual(chunk.published_at, "2026-04-01")
+        self.assertEqual(chunk.topics, ["PMLA"])
+        self.assertEqual(chunk.categories, ["Litigation"])
 
 
 class SakalAnswerLanguageTests(unittest.TestCase):
@@ -47,30 +94,6 @@ class SakalAnswerLanguageTests(unittest.TestCase):
 
 
 class RetrievalRerankingTests(unittest.TestCase):
-    def test_sakal_english_query_passthrough(self) -> None:
-        query = "In Pune Market Yard, which vegetables became costlier?"
-
-        self.assertEqual(
-            expand_sakal_english_query(query, source="sakal"),
-            query,
-        )
-
-    def test_non_sakal_query_passthrough(self) -> None:
-        query = "Enforcement Directorate PMLA bail orders"
-
-        self.assertEqual(
-            expand_sakal_english_query(query, source="barandbench"),
-            query,
-        )
-
-    def test_sakal_marathi_query_passthrough(self) -> None:
-        query = "पुणे मार्केटयार्डमध्ये कोणत्या भाज्या महागल्या?"
-
-        self.assertEqual(
-            expand_sakal_english_query(query, source="sakal"),
-            query,
-        )
-
     def test_rerank_mode_none_skips_jina_and_uses_retrieval_score(self) -> None:
         chunks = [
             RetrievedChunk(
