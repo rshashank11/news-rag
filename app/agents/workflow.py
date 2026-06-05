@@ -2,6 +2,7 @@ import re
 from typing import Literal
 
 from langgraph.graph import END, START, StateGraph
+from app.source_cache import source_cache
 from typing_extensions import TypedDict
 
 from app.barandbench_sources import (
@@ -21,9 +22,10 @@ from app.openai_client import (
     get_answer_model,
     get_context_judge_model,
     get_query_rewrite_model,
+    make_sync_context_judge_client,
     make_sync_chat_client,
 )
-from app.retrieval import retrieve_chunks
+from app.retrieval import retrieve_chunks, retrieve_chunks_fan_out
 from app.source_context import build_combined_source_context, truncate_text
 from schemas import (
     ChatResponse,
@@ -50,6 +52,7 @@ MIN_NEGATIVE_LIST_RELEVANCE_SCORE = settings.min_negative_list_relevance_score
 CITATION_PATTERN = re.compile(r"\[Source\s+(\d+)\]")
 
 client = make_sync_chat_client()
+context_judge_client = make_sync_context_judge_client()
 
 
 def display_source_name(source: str | None) -> str:
@@ -90,6 +93,7 @@ class ChatState(TypedDict):
     """
     question: str
     source: str
+    session_id: str
     history: list[ChatMessage]
     analysis: QueryAnalysis | None
     current_query: str | None
@@ -294,7 +298,10 @@ def order_sources_for_intent(
     ]
 
 
-def build_context_block(sources: list[NewsSource]) -> str:
+def build_context_block(
+    sources: list[NewsSource],
+    max_context_chars: int = MAX_CONTEXT_CHARS_PER_SOURCE,
+) -> str:
     """
     Turn selected sources into the text block given to the model.
 
@@ -310,7 +317,7 @@ def build_context_block(sources: list[NewsSource]) -> str:
                     f"[Source {source.source_number}]",
                     f"Headline: {source.headline}",
                     f"Published: {source.published_at or 'Unknown'}",
-                    f"Context: {source.match_snippet[:MAX_CONTEXT_CHARS_PER_SOURCE]}",
+                    f"Context: {source.match_snippet[:max_context_chars]}",
                 ]
             )
         )
@@ -886,20 +893,59 @@ def retrieve(state: ChatState):
     Search the selected news archive and prepare candidate sources.
 
     This step:
-    - runs hybrid retrieval,
+    - runs hybrid retrieval (with optional multi-query fan-out for Bar & Bench),
     - reranks chunks,
     - turns chunks into answer-ready sources.
     """
     analysis = require_analysis(state)
     query = state["current_query"] or analysis.search_query
+    entities = analysis.entities or []
+    query_variants = getattr(analysis, "query_variants", []) or []
 
-    chunks = retrieve_chunks(
-        query=query,
-        top_k=analysis.k,
-        from_date=analysis.from_date,
-        to_date=analysis.to_date,
-        source=state["source"],
-    )
+    cached_chunks: list[RetrievedChunk] = []
+    if analysis.uses_history:
+        cached = source_cache.get(state["session_id"], str(state["source"]))
+        if cached:
+            cached_chunks = cached
+
+    needs_fresh = getattr(analysis, "needs_fresh_retrieval", True)
+
+    if not analysis.uses_history or needs_fresh:
+        if (
+            settings.multi_query_fan_out
+            and query_variants
+            and settings.news_source_config(state["source"]).get("source") == "barandbench"
+        ):
+            fresh_chunks = retrieve_chunks_fan_out(
+                query=query,
+                query_variants=query_variants,
+                top_k=analysis.k,
+                from_date=analysis.from_date,
+                to_date=analysis.to_date,
+                source=state["source"],
+                entities=entities,
+            )
+        else:
+            fresh_chunks = retrieve_chunks(
+                query=query,
+                top_k=analysis.k,
+                from_date=analysis.from_date,
+                to_date=analysis.to_date,
+                source=state["source"],
+                entities=entities,
+            )
+    else:
+        fresh_chunks = []
+
+    seen_ids: set[str] = set()
+    chunks: list[RetrievedChunk] = []
+    for chunk in [*cached_chunks, *fresh_chunks]:
+        chunk_key = getattr(chunk, "id", None) or getattr(chunk, "chunk_id", None) or ""
+        if chunk_key and chunk_key not in seen_ids:
+            seen_ids.add(chunk_key)
+            chunks.append(chunk)
+        elif not chunk_key:
+            chunks.append(chunk)
 
     sources = order_sources_for_intent(
         build_sources_from_chunks(chunks, state["source"]),
@@ -917,6 +963,13 @@ def retrieve(state: ChatState):
 
     source_mode = source_profile(state["source"]).retrieval_workflow_detail
 
+    fan_out_detail = ""
+    if settings.multi_query_fan_out and query_variants:
+        fan_out_detail = (
+            f" Multi-query fan-out: {1 + len(query_variants)} queries "
+            f"(primary + {len(query_variants)} variant(s))."
+        )
+
     return {
         "chunks": chunks,
         "sources": sources,
@@ -930,7 +983,7 @@ def retrieve(state: ChatState):
                     f"{settings.rerank_candidate_top_k} Pinecone chunk(s), selected "
                     f"{len(chunks)} chunk(s) and {len(sources)} source(s). "
                     f"Source workflow: {source_mode}."
-                    f"{date_detail}{selection_detail}"
+                    f"{date_detail}{fan_out_detail}{selection_detail}"
                 ),
             )
         ],
@@ -956,11 +1009,15 @@ def check_context(state: ChatState):
             + [TraceStep(name="Judged context", detail="No sources were retrieved.")],
         }
 
-    context_block = build_context_block(sources)
+    context_block = build_context_block(
+        sources,
+        settings.max_context_judge_chars_per_source,
+    )
 
     try:
-        response = client.responses.parse(
+        response = context_judge_client.responses.parse(
             model=get_context_judge_model(),
+            timeout=30,
             input=[
                 {
                     "role": "system",
@@ -1117,6 +1174,7 @@ def rewrite_query(state: ChatState):
         try:
             response = client.responses.parse(
                 model=get_query_rewrite_model(),
+                timeout=30,
                 input=[
                     {
                         "role": "system",
@@ -1177,6 +1235,7 @@ def answer(state: ChatState):
     try:
         response = client.responses.parse(
             model=get_answer_model(),
+            timeout=90,
             input=[
                 {
                     "role": "system",
@@ -1217,6 +1276,8 @@ def answer(state: ChatState):
             )
         ]
 
+        source_cache.set(state["session_id"], str(state["source"]), state.get("chunks", []))
+
         return {
             "response": ChatResponse(
                 type="answer",
@@ -1239,16 +1300,70 @@ def answer(state: ChatState):
         )
 
 
+def limited_answer_message(
+    analysis: QueryAnalysis,
+    suggested_query: str | None = None,
+    best_score: int = 0,
+) -> str:
+    """
+    Choose a helpful fallback message based on what was searched.
+
+    When the user was doing a date-filtered browse, tell them the date may not
+    be indexed rather than asking them to narrow further.
+    When some related articles were found (score >= 3), acknowledge that and
+    surface any suggested query the context judge produced.
+    """
+    if analysis.from_date or analysis.to_date:
+        date_range = (
+            analysis.from_date
+            if analysis.from_date == analysis.to_date
+            else f"{analysis.from_date or 'start'} to {analysis.to_date or 'latest'}"
+        )
+        msg = (
+            f"I could not find enough indexed stories for {date_range}. "
+            "The archive may not have indexed articles from that date, or there may "
+            "be a gap in coverage. Try an adjacent date range, or add a specific "
+            "topic such as a court, statute, case name, or person to narrow the search."
+        )
+        if suggested_query:
+            msg += f' You could also try: "{suggested_query}".'
+        return msg
+
+    if best_score >= 3:
+        msg = (
+            "I found some related articles but could not confirm the specific "
+            "detail you asked about from the indexed news stories."
+        )
+    else:
+        msg = (
+            "I could not find enough directly supported indexed news context "
+            "to answer confidently."
+        )
+
+    if suggested_query:
+        msg += f' Try asking: "{suggested_query}".'
+    else:
+        msg += " Try adding a case name, court, person, organization, topic, or time period."
+
+    return msg
+
+
 def limited_answer_with_reason(state: ChatState, reason: str):
     """
     Return a safe response when the system cannot answer confidently.
 
-    Example:
-    If retrieval fails or the answer has invalid citations, the user gets a
-    limited-answer message instead of a guessed answer.
+    If retrieval found some relevant articles (score >= 3), include them so
+    the user has something useful to read even without a direct answer.
+    Surface the context judge's suggested query when available.
     """
     analysis = require_analysis(state)
     safe_reason = trace_detail(reason)
+
+    scores = extract_relevance_scores_from_steps(state.get("steps", []))
+    best_score = max(scores) if scores else 0
+    partial_sources = state.get("sources", [])
+    # Only surface sources when they had at least weak relevance
+    sources_to_show = partial_sources if (best_score >= 3 and partial_sources) else []
 
     steps = state.get("steps", []) + [
         TraceStep(name="Stopped safely", detail=safe_reason)
@@ -1257,15 +1372,15 @@ def limited_answer_with_reason(state: ChatState, reason: str):
     return {
         "response": ChatResponse(
             type="limited_answer",
-            message=(
-                "I could not find enough directly supported indexed news context "
-                "to answer confidently. Try adding a case name, court, person, "
-                "organization, topic, or time period."
+            message=limited_answer_message(
+                analysis,
+                suggested_query=state.get("suggested_query"),
+                best_score=best_score,
             ),
-            sources=[],
+            sources=sources_to_show,
             process_notes=build_process_notes(
                 analysis=analysis,
-                sources=state.get("sources", []),
+                sources=partial_sources,
                 steps=steps,
                 response_type="limited_answer",
                 source=state["source"],

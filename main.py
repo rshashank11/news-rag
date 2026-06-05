@@ -1,9 +1,14 @@
 import json
+import logging
 import time
+import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from langsmith import traceable
+
+logger = logging.getLogger(__name__)
 
 from app.agents.workflow import chat_graph
 from schemas import (
@@ -24,6 +29,7 @@ def build_initial_state(
     question: str,
     history: list[ChatMessage],
     source: str,
+    session_id: str = "",
 ) -> dict:
     """
     Create the starting data object for one chat request.
@@ -35,6 +41,7 @@ def build_initial_state(
     return {
         "question": question,
         "source": source,
+        "session_id": session_id,
         "history": history,
         "analysis": None,
         "current_query": None,
@@ -90,8 +97,20 @@ def health_check():
     return {"status": "ok"}
 
 
+@traceable(name="chat", run_type="chain", tags=["news-rag"])
+def _run_chat(question: str, source: str, session_id: str, history: list) -> dict:
+    return chat_graph.invoke(
+        build_initial_state(
+            question=question,
+            history=history,
+            source=source,
+            session_id=session_id,
+        )
+    )
+
+
 @app.post("/chat", response_model=ChatResponse)
-def chat(request: ChatRequest):
+def chat(request: ChatRequest, x_session_id: str | None = Header(default=None)):
     """
     Run the full chatbot workflow in one blocking request.
 
@@ -100,13 +119,14 @@ def chat(request: ChatRequest):
     """
     start_time = time.perf_counter()
 
+    session_id = x_session_id or str(uuid.uuid4())
+
     try:
-        result = chat_graph.invoke(
-            build_initial_state(
-                question=request.question,
-                history=request.history,
-                source=request.source,
-            )
+        result = _run_chat(
+            question=request.question,
+            source=request.source,
+            session_id=session_id,
+            history=request.history,
         )
         response = result.get("response")
 
@@ -117,9 +137,10 @@ def chat(request: ChatRequest):
         return response
 
     except Exception as exc:
+        logger.exception("Chat workflow failed")
         raise HTTPException(
             status_code=500,
-            detail=f"Chat workflow failed: {exc}",
+            detail="An internal error occurred. Please try again.",
         ) from exc
 
 
@@ -160,6 +181,9 @@ def describe_intent(analysis: QueryAnalysis) -> str:
 
     if analysis.intent == "briefing":
         return "prepare a briefing"
+
+    if analysis.intent == "clarify":
+        return "clarify the question"
 
     return "answer the question"
 
@@ -358,12 +382,13 @@ def process_event_for_node(node_name: str, update: dict) -> str | None:
 
 
 @app.post("/chat/stream")
-def chat_stream(request: ChatRequest):
+def chat_stream(request: ChatRequest, x_session_id: str | None = Header(default=None)):
     """
     Run the chatbot workflow as a streaming endpoint.
 
     The client receives progress events first, then one final answer event.
     """
+    @traceable(name="chat_stream", run_type="chain", tags=["news-rag"])
     def event_stream():
         """
         Yield Server-Sent Events while the graph runs.
@@ -372,12 +397,14 @@ def chat_stream(request: ChatRequest):
         silently for the final answer.
         """
         start_time = time.perf_counter()
+        session_id = x_session_id or str(uuid.uuid4())
 
         try:
             state = build_initial_state(
                 question=request.question,
                 history=request.history,
                 source=request.source,
+                session_id=session_id,
             )
             final_response = None
             live_process_notes = []
@@ -416,10 +443,11 @@ def chat_stream(request: ChatRequest):
             )
 
         except Exception as exc:
+            logger.exception("Chat stream workflow failed")
             yield sse_payload(
                 "error",
                 {
-                    "message": f"Chat workflow failed: {exc}",
+                    "message": "An internal error occurred. Please try again.",
                 },
             )
 

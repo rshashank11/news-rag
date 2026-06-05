@@ -207,7 +207,10 @@ def analyze_question(
     history = history or []
     selected_source = settings.news_source_config(source)["source"]
 
-    if not cleaned_question or len(cleaned_question.split()) < 2:
+    # Only bail out early for very short inputs when there is no prior context to
+    # resolve the meaning from. With history, a single word like "yes", "crime",
+    # or "opinion" can be a meaningful continuation and must go through the LLM.
+    if (not cleaned_question or len(cleaned_question.split()) < 2) and not history:
         return clarification_analysis(
             cleaned_question,
             "Could you add a person, case, court, organization, topic, or time period?",
@@ -218,6 +221,8 @@ def analyze_question(
         current_date = today.isoformat()
         response = client.responses.parse(
             model=get_planner_model(),
+            timeout=60,
+            temperature=0,
             input=[
                 {
                     "role": "system",
@@ -248,13 +253,15 @@ def analyze_question(
                         "Recent conversation is provided only to resolve follow-up "
                         "references like 'that case', 'the court', 'him', or 'the FIR'. "
                         "Do not treat conversation history as evidence. Evidence must "
-                        "come from retrieved archive sources later.\n\n"
-                        f"Recent conversation:\n{format_history_for_planner(history)}"
+                        "come from retrieved archive sources later."
                     ),
                 },
                 {
                     "role": "user",
-                    "content": cleaned_question,
+                    "content": (
+                        f"Recent conversation:\n{format_history_for_planner(history)}\n\n"
+                        f"Current question: {cleaned_question}"
+                    ),
                 },
             ],
             text_format=QueryAnalysis,

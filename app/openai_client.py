@@ -1,32 +1,124 @@
+import functools
+import os
+from typing import Any
+
 from openai import AsyncAzureOpenAI, AsyncOpenAI, AzureOpenAI, OpenAI
 
 from app.config import settings
 
+try:
+    from langsmith.wrappers import wrap_openai
+except ImportError:  # pragma: no cover - optional dependency in some deploys
+    wrap_openai = None
+
 
 def use_azure_openai() -> bool:
-    """
-    Check whether Azure OpenAI is configured.
-
-    If false, the app falls back to the normal OpenAI API settings.
-    """
     return bool(settings.azure_openai_api_key and settings.azure_openai_endpoint)
 
 
 def use_azure_chat() -> bool:
-    """
-    Check whether chat/completion calls should use Azure.
-
-    Embeddings can use Azure separately, but chat needs a chat deployment name.
-    """
     return bool(use_azure_openai() and settings.azure_openai_chat_deployment)
 
 
-def make_azure_openai_client(api_version: str) -> AsyncAzureOpenAI:
-    """
-    Create an async Azure OpenAI client.
+def use_direct_context_judge() -> bool:
+    return bool(
+        settings.openai_api_key
+        and getattr(settings, "openai_context_judge_model", "")
+        and not getattr(settings, "azure_openai_context_judge_deployment", "")
+    )
 
-    Async clients are useful for endpoints that can await model calls.
-    """
+
+def tracing_enabled() -> bool:
+    langsmith_tracing = os.getenv("LANGSMITH_TRACING", "")
+    legacy_tracing = os.getenv("LANGCHAIN_TRACING_V2", "")
+    return any(
+        value.lower() in ("true", "1")
+        for value in (langsmith_tracing, legacy_tracing)
+    )
+
+
+def maybe_wrap_openai_client(
+    client: OpenAI | AzureOpenAI,
+) -> OpenAI | AzureOpenAI:
+    if tracing_enabled() and wrap_openai is not None:
+        return add_default_langsmith_metadata(wrap_openai(client))
+    return client
+
+
+def langsmith_trace_model_name(model: str | None = None) -> str | None:
+    override = (
+        os.getenv("LANGSMITH_OPENAI_MODEL_NAME")
+        or os.getenv("AZURE_OPENAI_MODEL_NAME")
+    )
+    if override:
+        return override
+
+    if use_azure_openai():
+        return settings.openai_chat_model or model or None
+
+    return model or settings.openai_chat_model or None
+
+
+def langsmith_call_kwargs(model: str | None = None) -> dict[str, Any]:
+    if not tracing_enabled() or wrap_openai is None:
+        return {}
+
+    trace_model = langsmith_trace_model_name(model)
+    if not trace_model:
+        return {}
+
+    metadata = {
+        "ls_provider": "openai",
+        "ls_model_name": trace_model,
+    }
+
+    def apply_pricing_metadata(run_tree: Any) -> None:
+        run_tree.add_metadata(metadata)
+
+    return {
+        "langsmith_extra": {
+            "metadata": metadata,
+            "_on_success": apply_pricing_metadata,
+        }
+    }
+
+
+def add_default_langsmith_metadata(
+    client: OpenAI | AzureOpenAI,
+) -> OpenAI | AzureOpenAI:
+    def patch_method(owner: Any, method_name: str) -> None:
+        if not hasattr(owner, method_name):
+            return
+
+        original_method = getattr(owner, method_name)
+
+        @functools.wraps(original_method)
+        def wrapped_method(*args: Any, **kwargs: Any) -> Any:
+            if "langsmith_extra" not in kwargs:
+                kwargs.update(langsmith_call_kwargs(kwargs.get("model")))
+            return original_method(*args, **kwargs)
+
+        setattr(owner, method_name, wrapped_method)
+
+    if hasattr(client, "responses"):
+        patch_method(client.responses, "create")
+        patch_method(client.responses, "parse")
+
+    if hasattr(client, "chat") and hasattr(client.chat, "completions"):
+        patch_method(client.chat.completions, "create")
+        patch_method(client.chat.completions, "parse")
+
+    if (
+        hasattr(client, "beta")
+        and hasattr(client.beta, "chat")
+        and hasattr(client.beta.chat, "completions")
+    ):
+        patch_method(client.beta.chat.completions, "parse")
+
+    return client
+
+
+def make_azure_openai_client(api_version: str) -> AsyncAzureOpenAI:
     if not use_azure_openai():
         raise RuntimeError(
             "Azure OpenAI is not configured. Set AZURE_OPENAI_API_KEY and "
@@ -41,11 +133,6 @@ def make_azure_openai_client(api_version: str) -> AsyncAzureOpenAI:
 
 
 def make_sync_azure_openai_client(api_version: str) -> AzureOpenAI:
-    """
-    Create a blocking Azure OpenAI client.
-
-    LangGraph workflow nodes here run synchronously, so they use sync clients.
-    """
     if not use_azure_openai():
         raise RuntimeError(
             "Azure OpenAI is not configured. Set AZURE_OPENAI_API_KEY and "
@@ -60,9 +147,6 @@ def make_sync_azure_openai_client(api_version: str) -> AzureOpenAI:
 
 
 def make_direct_openai_client() -> AsyncOpenAI:
-    """
-    Create an async OpenAI client using OPENAI_API_KEY.
-    """
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is missing.")
 
@@ -70,9 +154,6 @@ def make_direct_openai_client() -> AsyncOpenAI:
 
 
 def make_sync_direct_openai_client() -> OpenAI:
-    """
-    Create a blocking OpenAI client using OPENAI_API_KEY.
-    """
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is missing.")
 
@@ -80,13 +161,6 @@ def make_sync_direct_openai_client() -> OpenAI:
 
 
 def make_embedding_client() -> AsyncOpenAI | AsyncAzureOpenAI:
-    """
-    Create the async client for embedding calls.
-
-    Example:
-    If Azure credentials are set, use Azure.
-    Otherwise use direct OpenAI.
-    """
     if use_azure_openai():
         api_version = (
             settings.azure_openai_embedding_api_version
@@ -98,12 +172,6 @@ def make_embedding_client() -> AsyncOpenAI | AsyncAzureOpenAI:
 
 
 def make_sync_embedding_client() -> OpenAI | AzureOpenAI:
-    """
-    Create the blocking client for embedding calls.
-
-    Ingestion scripts use this because they run as normal Python scripts, not
-    async web handlers.
-    """
     if use_azure_openai():
         api_version = (
             settings.azure_openai_embedding_api_version
@@ -115,9 +183,6 @@ def make_sync_embedding_client() -> OpenAI | AzureOpenAI:
 
 
 def make_chat_client() -> AsyncOpenAI | AsyncAzureOpenAI:
-    """
-    Create the async client for chat/model calls.
-    """
     if use_azure_chat():
         return make_azure_openai_client(
             api_version=settings.azure_openai_chat_api_version
@@ -127,24 +192,26 @@ def make_chat_client() -> AsyncOpenAI | AsyncAzureOpenAI:
 
 
 def make_sync_chat_client() -> OpenAI | AzureOpenAI:
-    """
-    Create the blocking chat client used by planner and workflow steps.
-    """
     if use_azure_chat():
-        return make_sync_azure_openai_client(
+        client = make_sync_azure_openai_client(
             api_version=settings.azure_openai_chat_api_version
         )
+    else:
+        client = make_sync_direct_openai_client()
 
-    return make_sync_direct_openai_client()
+    return maybe_wrap_openai_client(client)
+
+
+def make_sync_context_judge_client() -> OpenAI | AzureOpenAI:
+    if use_direct_context_judge():
+        client = make_sync_direct_openai_client()
+        return maybe_wrap_openai_client(client)
+
+    # make_sync_chat_client already applies wrap_openai when tracing is enabled
+    return make_sync_chat_client()
 
 
 def get_embedding_model() -> str:
-    """
-    Return the embedding model name.
-
-    With Azure, this returns the deployment name.
-    With direct OpenAI, this returns something like "text-embedding-3-small".
-    """
     if use_azure_openai() and settings.azure_openai_embedding_deployment:
         return settings.azure_openai_embedding_deployment
 
@@ -152,12 +219,6 @@ def get_embedding_model() -> str:
 
 
 def get_chat_model() -> str:
-    """
-    Return the chat model name.
-
-    With Azure, this returns the chat deployment name.
-    With direct OpenAI, this returns the configured chat model.
-    """
     if use_azure_chat():
         return settings.azure_openai_chat_deployment
 
@@ -165,12 +226,6 @@ def get_chat_model() -> str:
 
 
 def get_planner_model() -> str:
-    """
-    Return the model used to plan search queries.
-
-    The planner can use a separate model if configured; otherwise it shares the
-    normal chat model.
-    """
     if use_azure_chat() and settings.azure_openai_planner_deployment:
         return settings.azure_openai_planner_deployment
 
@@ -181,21 +236,35 @@ def get_planner_model() -> str:
 
 
 def get_context_judge_model() -> str:
-    """
-    Return the model used to judge whether retrieved sources are enough.
-    """
-    return get_chat_model()
+    if use_azure_chat():
+        azure_context_judge_deployment = getattr(
+            settings, "azure_openai_context_judge_deployment", ""
+        )
+        openai_context_judge_model = getattr(
+            settings, "openai_context_judge_model", ""
+        )
+
+        if azure_context_judge_deployment:
+            return azure_context_judge_deployment
+
+        if use_direct_context_judge():
+            return openai_context_judge_model
+
+        if settings.azure_openai_planner_deployment:
+            return settings.azure_openai_planner_deployment
+
+        return get_chat_model()
+
+    openai_context_judge_model = getattr(settings, "openai_context_judge_model", "")
+    if openai_context_judge_model:
+        return openai_context_judge_model
+
+    return get_planner_model()
 
 
 def get_query_rewrite_model() -> str:
-    """
-    Return the model used to rewrite weak search queries.
-    """
     return get_chat_model()
 
 
 def get_answer_model() -> str:
-    """
-    Return the model used to write the final grounded answer.
-    """
     return get_chat_model()

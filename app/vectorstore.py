@@ -59,7 +59,6 @@ def get_hybrid_weights(alpha: float | None = None) -> tuple[float, float]:
     return dense_weight, sparse_weight
 
 
-@lru_cache(maxsize=4)
 def get_index(source: str | None = None):
     """
     Get the Pinecone index client for the selected news source.
@@ -70,7 +69,13 @@ def get_index(source: str | None = None):
 
     lru_cache avoids creating a new Pinecone client on every request.
     """
-    source_config = settings.news_source_config(source)
+    source_name = settings.news_source_config(source)["source"]
+    return _get_index_cached(source_name)
+
+
+@lru_cache(maxsize=4)
+def _get_index_cached(source_name: str):
+    source_config = settings.news_source_config(source_name)
     pc = Pinecone(api_key=settings.pinecone_api_key)
 
     if source_config.get("pinecone_index_host"):

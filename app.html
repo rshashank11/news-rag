@@ -829,15 +829,17 @@
         </div>
 
         <nav class="source-tabs" aria-label="News source">
+          <!-- eSakal is hidden for the Bar & Bench-only deployment.
           <label class="source-tab active">
             <input type="radio" name="newsSource" value="sakal" data-label="esakal" checked />
             <span>ESAKAL</span>
           </label>
+          -->
 
-          <!-- <label class="source-tab">
-            <input type="radio" name="newsSource" value="barandbench" data-label="Bar &amp; Bench" />
+          <label class="source-tab active">
+            <input type="radio" name="newsSource" value="barandbench" data-label="Bar &amp; Bench" checked />
             <span>Bar &amp; Bench</span>
-          </label> -->
+          </label>
         </nav>
 
         <div class="top-actions">
@@ -1044,11 +1046,11 @@
     }
 
     function selectedSource() {
-      return selectedSourceInput()?.value || 'sakal';
+      return selectedSourceInput()?.value || 'barandbench';
     }
 
     function selectedSourceLabel() {
-      return selectedSourceInput()?.dataset.label || 'esakal';
+      return selectedSourceInput()?.dataset.label || 'Bar & Bench';
     }
 
     function updateSourceTabs() {
@@ -1072,7 +1074,7 @@
 
     function renderPromptCards() {
       const source = selectedSource();
-      const prompts = promptSets[source] || promptSets.sakal;
+      const prompts = promptSets[source] || promptSets.barandbench;
 
       promptGrid.innerHTML = prompts.map(item => `
         <button class="prompt-card" type="button" data-prompt="${escapeHtml(item.prompt)}">

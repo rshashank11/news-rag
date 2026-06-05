@@ -1,3 +1,4 @@
+import logging
 import re
 from typing import Literal
 
@@ -46,8 +47,10 @@ class QueryAnalysis(StrictBaseModel):
     intent: Literal["answer", "briefing", "timeline", "clarify", "out_of_scope"]
     search_query: str = Field(min_length=1, max_length=300)
     entities: list[str] = Field(default_factory=list, max_length=20)
-    k: int = Field(default=10, ge=3, le=80)
+    query_variants: list[str] = Field(default_factory=list, max_length=3)
+    k: int = Field(default=15, ge=3, le=80)
     uses_history: bool = False
+    needs_fresh_retrieval: bool = True
     clarification_needed: bool = False
     clarification_question: str | None = Field(default=None, max_length=300)
     from_date: str | None = None
@@ -76,6 +79,27 @@ class QueryAnalysis(StrictBaseModel):
                 seen.add(key)
 
         return cleaned_entities
+
+    @field_validator("query_variants")
+    @classmethod
+    def clean_query_variants(cls, values: list[str]) -> list[str]:
+        cleaned_variants = []
+        seen = set()
+
+        for value in values:
+            cleaned = clean_text(value)
+            key = cleaned.lower()
+            if cleaned and key not in seen:
+                if len(cleaned) > 300:
+                    logging.warning(
+                        "query_variant truncated from %d to 300 chars: %r",
+                        len(cleaned),
+                        cleaned[:60],
+                    )
+                cleaned_variants.append(cleaned[:300])
+                seen.add(key)
+
+        return cleaned_variants
 
     @field_validator("from_date", "to_date")
     @classmethod
@@ -222,7 +246,9 @@ class ChatResponse(StrictBaseModel):
         if self.type == "answer" and not self.sources:
             raise ValueError("Answer responses require at least one source.")
 
-        if self.type in {"out_of_scope", "limited_answer"} and self.sources:
-            raise ValueError("Out-of-scope and limited answers should not include sources.")
+        if self.type == "out_of_scope" and self.sources:
+            raise ValueError("Out-of-scope responses should not include sources.")
+
+        # limited_answer may include partially-relevant sources as reading material
 
         return self

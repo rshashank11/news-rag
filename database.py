@@ -65,6 +65,9 @@ def AsyncSessionLocal() -> AsyncSession:
 engine = create_engine(
     to_sync_url(settings.postgresql_url),
     pool_pre_ping=True,
+    pool_size=10,
+    max_overflow=5,
+    pool_timeout=10,
 )
 
 SessionLocal = sessionmaker(

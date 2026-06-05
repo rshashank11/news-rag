@@ -1,6 +1,6 @@
 import time
 
-from openai import APIError, RateLimitError
+from openai import APIError, APIStatusError, RateLimitError
 
 from app.openai_client import get_embedding_model, make_sync_embedding_client
 
@@ -50,14 +50,16 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
                 input=texts,
             )
             break
-        except RateLimitError as exc:
+        except RateLimitError:
             wait_seconds = max(MIN_RATE_LIMIT_WAIT_SECONDS, 2 ** attempt)
             print(
                 "Embedding rate limit hit. "
                 f"Retrying in {wait_seconds} seconds..."
             )
             time.sleep(wait_seconds)
-        except APIError as exc:
+        except APIStatusError as exc:
+            if exc.status_code < 500:
+                raise
             wait_seconds = max(MIN_RATE_LIMIT_WAIT_SECONDS, 2 ** attempt)
             print(
                 f"Embedding API error: {exc}. "

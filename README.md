@@ -51,6 +51,7 @@ OpenAI settings:
 
 - `OPENAI_API_KEY`
 - `OPENAI_CHAT_MODEL`
+- `OPENAI_CONTEXT_JUDGE_MODEL`
 - `OPENAI_EMBEDDING_MODEL`
 
 Azure OpenAI can be used instead of direct OpenAI by setting:
@@ -63,6 +64,7 @@ Azure OpenAI can be used instead of direct OpenAI by setting:
 - `AZURE_OPENAI_EMBEDDING_DEPLOYMENT`
 - `AZURE_OPENAI_CHAT_DEPLOYMENT`
 - `AZURE_OPENAI_PLANNER_DEPLOYMENT`
+- `AZURE_OPENAI_CONTEXT_JUDGE_DEPLOYMENT`
 
 Optional retrieval settings:
 
@@ -72,6 +74,7 @@ Optional retrieval settings:
 - `HYBRID_ALPHA` controls dense-vs-sparse search balance
 - `RERANK_MODE=none` uses Pinecone scores only
 - `RERANK_MODE=jina` enables Jina reranking when `JINA_API_KEY` is set
+- `MAX_CONTEXT_JUDGE_CHARS_PER_SOURCE` caps source text sent to the fast context judge only
 
 ## Run Locally
 

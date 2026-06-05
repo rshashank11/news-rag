@@ -1,7 +1,9 @@
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from app.config import settings
 from app.embeddings import embed_text
+from app.legal_extraction import CANONICAL_COURT_MAP, KNOWN_COURT_NAMES, extract_courts
 from app.news_sources import source_profile
 from app.sparse import encode_sparse_query
 from app.vectorstore import hybrid_query
@@ -46,7 +48,10 @@ def iso_date_to_yyyymmdd(value: str | None) -> int | None:
     if value is None:
         return None
 
-    return int(value.replace("-", ""))
+    try:
+        return int(value.replace("-", ""))
+    except (ValueError, AttributeError):
+        return None
 
 
 def build_pinecone_date_filter(
@@ -78,6 +83,57 @@ def build_pinecone_date_filter(
     date_field = runtime_source_profile(source).date_filter_field
 
     return {date_field: date_filter}
+
+
+def build_pinecone_court_filter(
+    entities: list[str],
+    source: str | None = None,
+) -> dict | None:
+    """
+    Build an optional Pinecone court filter from extracted entities.
+
+    Only applied for Bar & Bench when one or more entities map cleanly to a
+    known court name. Court-based filtering is high-precision because court
+    names are exact and unambiguous.
+
+    Example:
+    entities=["Supreme Court", "Delhi High Court"] →
+        {"court": {"$in": ["Supreme Court", "Delhi High Court"]}}
+    """
+    if not entities:
+        return None
+
+    source_name = settings.news_source_config(source).get("source")
+    if source_name != "barandbench":
+        return None
+
+    matched_courts = [
+        CANONICAL_COURT_MAP[entity.lower()]
+        for entity in entities
+        if entity.lower() in KNOWN_COURT_NAMES
+    ]
+
+    if not matched_courts:
+        return None
+
+    return {"court": {"$in": matched_courts}}
+
+
+def combine_pinecone_filters(*filters: dict | None) -> dict | None:
+    """
+    Combine multiple Pinecone metadata filters with $and.
+
+    Skips None filters and returns a single filter or $and clause.
+    """
+    active = [f for f in filters if f is not None]
+
+    if not active:
+        return None
+
+    if len(active) == 1:
+        return active[0]
+
+    return {"$and": active}
 
 
 def get_match_value(match, name: str, default=None):
@@ -477,6 +533,7 @@ def retrieve_chunks(
     from_date: str | None = None,
     to_date: str | None = None,
     source: str | None = None,
+    entities: list[str] | None = None,
 ) -> list[RetrievedChunk]:
     """
     Retrieve the best matching news chunks for one planned search query.
@@ -488,7 +545,6 @@ def retrieve_chunks(
     4. format and rerank the returned chunks.
     """
     cleaned_query = clean_text(query)
-    retrieval_query = cleaned_query
 
     if not cleaned_query:
         raise ValueError("Search query cannot be empty.")
@@ -498,19 +554,24 @@ def retrieve_chunks(
         max(search_top_k, settings.rerank_candidate_top_k)
     )
 
-    dense_vector = embed_text(retrieval_query)
-    sparse_vector = encode_sparse_query(retrieval_query, source=source)
+    source_config = settings.news_source_config(source)
+    source_alpha = source_config.get("hybrid_alpha")
+
+    dense_vector = embed_text(cleaned_query)
+    sparse_vector = encode_sparse_query(cleaned_query, source=source)
     date_filter = build_pinecone_date_filter(
         from_date,
         to_date,
         source=source,
     )
-    metadata_filter = date_filter
+    court_filter = build_pinecone_court_filter(entities or [], source=source)
+    metadata_filter = combine_pinecone_filters(date_filter, court_filter)
 
     response = hybrid_query(
         dense_vector=dense_vector,
         sparse_vector=sparse_vector,
         top_k=candidate_top_k,
+        alpha=source_alpha,
         metadata_filter=metadata_filter,
         source=source,
     )
@@ -527,12 +588,45 @@ def retrieve_chunks(
             chunks.append(chunk)
 
     chunks = rerank_chunks_by_story(
-        retrieval_query,
+        cleaned_query,
         dedupe_chunks(chunks),
     )
 
     if chunks or metadata_filter is None:
         return chunks[:search_top_k]
+
+    # If both a court filter and a date filter were active but returned nothing,
+    # try dropping the court filter first while keeping the date filter. Court
+    # metadata is not always populated consistently, so some articles about a
+    # specific court may be missing the court field entirely.
+    if court_filter is not None and date_filter is not None:
+        date_only_response = hybrid_query(
+            dense_vector=dense_vector,
+            sparse_vector=sparse_vector,
+            top_k=candidate_top_k,
+            alpha=source_alpha,
+            metadata_filter=date_filter,
+            source=source,
+        )
+
+        date_only_chunks = []
+
+        for match in get_match_value(date_only_response, "matches", []) or []:
+            chunk = format_match(match, source=source)
+
+            if chunk is None:
+                continue
+
+            if document_matches_date_filter(chunk, from_date, to_date):
+                date_only_chunks.append(chunk)
+
+        date_only_chunks = rerank_chunks_by_story(
+            cleaned_query,
+            dedupe_chunks(date_only_chunks),
+        )
+
+        if date_only_chunks:
+            return date_only_chunks[:search_top_k]
 
     # If Pinecone returns no filtered matches, run one wider search and apply the
     # same date check in Python. This helps while a namespace is still being rebuilt.
@@ -540,6 +634,7 @@ def retrieve_chunks(
         dense_vector=dense_vector,
         sparse_vector=sparse_vector,
         top_k=max(candidate_top_k, settings.date_fallback_top_k),
+        alpha=source_alpha,
         source=source,
     )
 
@@ -555,6 +650,85 @@ def retrieve_chunks(
             fallback_chunks.append(chunk)
 
     return rerank_chunks_by_story(
-        retrieval_query,
+        cleaned_query,
         dedupe_chunks(fallback_chunks),
     )[:search_top_k]
+
+
+def retrieve_chunks_fan_out(
+    query: str,
+    query_variants: list[str],
+    top_k: int | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    source: str | None = None,
+    entities: list[str] | None = None,
+) -> list[RetrievedChunk]:
+    """
+    Retrieve chunks using the primary query plus alternate query variants.
+
+    Each variant is searched independently at a reduced candidate pool, then
+    all results are merged, deduplicated by chunk ID (keeping the best score),
+    and re-ranked together. This improves recall when the primary query misses
+    articles using different legal terminology for the same concept.
+
+    Example:
+    Primary: "ED PMLA bail Supreme Court"
+    Variant 1: "Enforcement Directorate money laundering bail order"
+    Variant 2: "Prevention of Money Laundering Act arrest bail judgment"
+    → merged pool covers both abbreviations and full-form phrasing.
+    """
+    search_top_k = clamp_top_k(top_k)
+    main_candidate_top_k = clamp_top_k(
+        max(search_top_k, settings.rerank_candidate_top_k)
+    )
+    variant_candidate_top_k = max(
+        int(main_candidate_top_k * settings.multi_query_variant_top_k_fraction),
+        settings.min_retrieval_top_k,
+    )
+
+    # Build list of (query_text, candidate_k) pairs: primary first, then variants
+    query_jobs: list[tuple[str, int]] = [(clean_text(query), main_candidate_top_k)]
+    for variant in query_variants:
+        variant_clean = clean_text(variant)
+        if variant_clean:
+            query_jobs.append((variant_clean, variant_candidate_top_k))
+
+    def _run_query(job: tuple[str, int]) -> list[RetrievedChunk]:
+        q, k = job
+        return retrieve_chunks(
+            query=q,
+            top_k=k,
+            from_date=from_date,
+            to_date=to_date,
+            source=source,
+            entities=entities,
+        )
+
+    all_chunks: list[RetrievedChunk] = []
+    with ThreadPoolExecutor(max_workers=len(query_jobs)) as executor:
+        futures = {executor.submit(_run_query, job): job for job in query_jobs}
+        for future in as_completed(futures):
+            try:
+                all_chunks.extend(future.result())
+            except Exception as exc:
+                print(f"Warning: fan-out query failed: {exc}")
+
+    # Dedupe by chunk ID, keeping the copy with the best retrieval_score
+    best_by_id: dict[str, RetrievedChunk] = {}
+    for chunk in all_chunks:
+        existing = best_by_id.get(chunk.id)
+        if existing is None:
+            best_by_id[chunk.id] = chunk
+        elif (chunk.retrieval_score or 0.0) > (existing.retrieval_score or 0.0):
+            best_by_id[chunk.id] = chunk
+
+    merged_chunks = list(best_by_id.values())
+
+    # Re-rank the merged pool using the primary query as the ranking signal
+    reranked = rerank_chunks_by_story(
+        clean_text(query),
+        merged_chunks,
+    )
+
+    return reranked[:search_top_k]

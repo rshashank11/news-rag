@@ -13,6 +13,8 @@ from pinecone.grpc import PineconeGRPC as Pinecone
 from pinecone_text.sparse import BM25Encoder
 
 from app.embeddings import embed_texts
+from app.legal_extraction import extract_courts, extract_statutes, extract_case_type
+from app.legal_tokenizer import apply_legal_tokenizer
 from app.sparse import to_pinecone_sparse_values
 from database import SessionLocal, engine, Base
 from models import StoryMetaData
@@ -311,6 +313,10 @@ def build_bm25_encoder(file_paths: list[str]) -> BM25Encoder:
 
     BM25 learns the Bar & Bench paragraph vocabulary, so exact legal terms like
     "PMLA", "NCLT", or "bail" can match strongly.
+
+    Legal compound terms (e.g. "Supreme Court", "Enforcement Directorate") are
+    pre-processed into single underscore-joined tokens before fitting, so they
+    are treated as one BM25 token rather than two separate words.
     """
     if BM25_ENCODER_PATH.exists():
         print(f"Loading BM25 encoder from {BM25_ENCODER_PATH}")
@@ -320,7 +326,8 @@ def build_bm25_encoder(file_paths: list[str]) -> BM25Encoder:
     corpus = []
 
     for _, _, data in iter_story_data(file_paths):
-        corpus.extend(extract_paragraphs(data))
+        for paragraph in extract_paragraphs(data):
+            corpus.append(apply_legal_tokenizer(paragraph))
 
     if not corpus:
         raise RuntimeError("Cannot fit BM25 encoder because no paragraphs were found.")
@@ -385,7 +392,9 @@ def flush_chunks(index, namespace, pending_chunks, bm25_encoder):
 
         embeddings = embed_texts(chunk_texts)
         sparse_vectors = [
-            to_pinecone_sparse_values(bm25_encoder.encode_documents(chunk_text))
+            to_pinecone_sparse_values(
+                bm25_encoder.encode_documents(apply_legal_tokenizer(chunk_text))
+            )
             for chunk_text in chunk_texts
         ]
 
@@ -405,6 +414,9 @@ def flush_chunks(index, namespace, pending_chunks, bm25_encoder):
                     "topics_normalized": chunk["topics_normalized"],
                     "categories": chunk["categories"],
                     "categories_normalized": chunk["categories_normalized"],
+                    "court": chunk["court"],
+                    "statutes": chunk["statutes"],
+                    "case_type": chunk["case_type"],
                     "chunk_text": chunk["chunk_text"],
                 },
             }
@@ -486,6 +498,12 @@ def ingest_files(file_paths: list[str]):
             topics_normalized = normalized_metadata_values(topics)
             categories_normalized = normalized_metadata_values(categories)
 
+            # Extract legal metadata from headline + full article text
+            legal_text = (data.get("headline", "") + " " + full_content).strip()
+            story_courts = extract_courts(legal_text)
+            story_statutes = extract_statutes(legal_text)
+            story_case_type = extract_case_type(legal_text)
+
             existing_story = db.get(StoryMetaData, story_id)
 
             if not existing_story:
@@ -514,6 +532,9 @@ def ingest_files(file_paths: list[str]):
                         "topics_normalized": topics_normalized,
                         "categories": categories,
                         "categories_normalized": categories_normalized,
+                        "court": story_courts,
+                        "statutes": story_statutes,
+                        "case_type": story_case_type,
                         "chunk_text": paragraph,
                         "source_path": str(path),
                         "source_line": line_number,
@@ -543,6 +564,9 @@ def parse_args():
     Example:
     python ingest_barandbench.py data/stories-barandbench-1.txt
     ingests only that file.
+
+    python ingest_barandbench.py --bm25-only
+    re-fits the BM25 encoder without touching Pinecone or Postgres.
     """
     parser = argparse.ArgumentParser(
         description="Ingest Bar & Bench story dumps into Postgres and Pinecone."
@@ -553,9 +577,51 @@ def parse_args():
         default=DEFAULT_DATA_FILES,
         help="Story dump files to ingest.",
     )
+    parser.add_argument(
+        "--bm25-only",
+        action="store_true",
+        help=(
+            "Re-fit the BM25 encoder only. Deletes the existing encoder file and "
+            "rebuilds it from the corpus with the legal tokenizer. "
+            "Does not touch Pinecone or Postgres."
+        ),
+    )
     return parser.parse_args()
+
+
+def rebuild_bm25(file_paths: list[str]):
+    """
+    Re-fit the BM25 encoder and atomically replace the existing file.
+
+    Writes to a temp file first so the existing encoder is never deleted unless
+    the new one is successfully written. This prevents the running app from
+    crashing if the rebuild fails partway through.
+    """
+    import shutil
+
+    print("Fitting BM25 encoder on paragraph corpus...")
+    corpus = []
+    for _, _, data in iter_story_data(file_paths):
+        for paragraph in extract_paragraphs(data):
+            corpus.append(apply_legal_tokenizer(paragraph))
+
+    if not corpus:
+        raise RuntimeError("Cannot fit BM25 encoder: no paragraphs were found.")
+
+    encoder = BM25Encoder().default()
+    encoder.fit(corpus)
+
+    tmp_path = BM25_ENCODER_PATH.with_suffix(".tmp")
+    BM25_ENCODER_PATH.parent.mkdir(parents=True, exist_ok=True)
+    encoder.dump(str(tmp_path))
+
+    shutil.move(str(tmp_path), str(BM25_ENCODER_PATH))
+    print(f"BM25 encoder rebuilt and saved to {BM25_ENCODER_PATH}")
 
 
 if __name__ == "__main__":
     args = parse_args()
-    ingest_files(args.files)
+    if args.bm25_only:
+        rebuild_bm25(args.files)
+    else:
+        ingest_files(args.files)

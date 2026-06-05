@@ -1,3 +1,4 @@
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,6 +16,7 @@ class Settings(BaseSettings):
     openai_embedding_model: str = "text-embedding-3-small"
     openai_chat_model: str = "gpt-4o-mini"
     openai_planner_model: str = ""
+    openai_context_judge_model: str = ""
 
     azure_openai_api_key: str = ""
     azure_openai_endpoint: str = ""
@@ -24,6 +26,7 @@ class Settings(BaseSettings):
     azure_openai_embedding_deployment: str = ""
     azure_openai_chat_deployment: str = ""
     azure_openai_planner_deployment: str = ""
+    azure_openai_context_judge_deployment: str = ""
 
     pinecone_api_key: str
     pinecone_index_host: str
@@ -34,40 +37,46 @@ class Settings(BaseSettings):
     barandbench_pinecone_index_host: str = ""
     barandbench_pinecone_namespace: str = "barandbench"
     barandbench_bm25_encoder_path: str = "bm25_barandbench_values.json"
+    barandbench_hybrid_alpha: float = Field(default=0.35, ge=0.0, le=1.0)
 
     sakal_pinecone_index_name: str = "sakal"
     sakal_pinecone_index_host: str = ""
     sakal_pinecone_namespace: str = "sakal_v1"
     sakal_bm25_encoder_path: str = "bm25_sakal_values.json"
 
+    source_cache_ttl_seconds: int = 600
+
     retrieval_top_k: int = 10
     min_retrieval_top_k: int = 1
     max_retrieval_top_k: int = 80
     date_fallback_top_k: int = 400
     hybrid_alpha: float = 0.5
+    multi_query_fan_out: bool = True
+    multi_query_variant_top_k_fraction: float = Field(default=0.5, ge=0.0, le=1.0)
     default_query_k: int = 10
     follow_up_query_k: int = 80
     max_history_messages: int = 8
-    max_history_chars: int = 6000
-    max_history_message_chars: int = 1200
+    max_history_chars: int = 12000
+    max_history_message_chars: int = 3000
 
     # Workflow configuration thresholds
     max_retrieval_attempts: int = 2
-    max_answer_sources: int = 6
+    max_answer_sources: int = 10
     max_context_chars_per_source: int = 6000
+    max_context_judge_chars_per_source: int = 3000
     max_story_excerpt_chars: int = 5000
     min_timeline_dated_sources: int = 2
     min_timeline_relevance_score: int = 5
     min_partial_briefing_relevance_score: int = 4
     min_negative_list_relevance_score: int = 3
     rerank_min_token_length: int = 3
-    rerank_candidate_top_k: int = 30
+    rerank_candidate_top_k: int = 50
     rerank_vector_score_weight: float = 1.0
     rerank_headline_overlap_weight: float = 2.5
     rerank_metadata_overlap_weight: float = 1.5
     rerank_chunk_overlap_weight: float = 0.75
     rerank_date_score_weight: float = 0.25
-    rerank_story_evidence_weight: float = 0.15
+    rerank_story_evidence_weight: float = 0.05
     rerank_story_evidence_cap: int = 3
     rerank_debug_story_count: int = 3
 
@@ -102,6 +111,7 @@ class Settings(BaseSettings):
                 "pinecone_index_host": self.barandbench_pinecone_index_host or self.pinecone_index_host,
                 "pinecone_namespace": self.barandbench_pinecone_namespace,
                 "bm25_encoder_path": self.barandbench_bm25_encoder_path,
+                "hybrid_alpha": self.barandbench_hybrid_alpha,
             }
 
         if selected_source == "sakal":
@@ -111,6 +121,7 @@ class Settings(BaseSettings):
                 "pinecone_index_host": self.sakal_pinecone_index_host,
                 "pinecone_namespace": self.sakal_pinecone_namespace,
                 "bm25_encoder_path": self.sakal_bm25_encoder_path,
+                "hybrid_alpha": self.hybrid_alpha,
             }
 
         raise ValueError(f"Unsupported news source: {source}")
