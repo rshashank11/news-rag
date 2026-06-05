@@ -1,3 +1,10 @@
+---
+title: Bar And Bench RAG
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # NewsGPT
 
 NewsGPT is a FastAPI-based RAG chatbot for searching and answering questions
