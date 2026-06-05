@@ -1,140 +1,220 @@
----
-title: Bar And Bench RAG
-sdk: docker
-app_port: 7860
-pinned: false
----
-
 # NewsGPT
 
-NewsGPT is a FastAPI-based RAG chatbot for searching and answering questions
-from indexed news archives. It currently supports two sources:
+> A FastAPI-based hybrid RAG chatbot for searching and answering questions from indexed news archives.
 
-- Sakal
-- Bar & Bench
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688)](https://fastapi.tiangolo.com/)
+[![LangGraph](https://img.shields.io/badge/LangGraph-0.2%2B-orange)](https://github.com/langchain-ai/langgraph)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-The app does not answer from model memory. It plans a search query, retrieves
-relevant chunks from Pinecone, optionally reranks them, and generates a grounded
-answer with citations from the retrieved sources.
+NewsGPT answers questions grounded exclusively in retrieved news content — it never draws on model memory. It supports two sources out of the box:
+
+| Source | Language | Index |
+|---|---|---|
+| [Sakal](https://www.sakal.com/) | Marathi | Pinecone |
+| [Bar & Bench](https://www.barandbench.com/) | English | Pinecone + PostgreSQL |
+
+---
+
+## Table of Contents
+
+- [How It Works](#how-it-works)
+- [Architecture](#architecture)
+- [Prerequisites](#prerequisites)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
+- [Ingestion](#ingestion)
+- [Tests](#tests)
+- [Project Structure](#project-structure)
+
+---
+
+## How It Works
+
+```
+User question
+     │
+     ▼
+ Planner — rewrites the question into a source-aware search query
+     │
+     ▼
+ Retriever — dense embedding + BM25 sparse vectors → Pinecone hybrid search
+     │
+     ▼
+ Context judge — checks whether retrieved chunks are sufficient
+     │
+     ▼
+ Answer — generates a grounded response with inline citations
+```
+
+1. The **planner** turns the user's question into a source-aware search query.
+2. The **retriever** embeds the query for semantic (dense) search.
+3. The **BM25 encoder** converts the query into sparse keyword values.
+4. **Pinecone** runs hybrid search combining dense and sparse vectors.
+5. The **context judge** decides whether retrieved chunks are sufficient.
+6. The **answer** step writes a source-grounded response with citations.
 
 ## Architecture
 
 ![NewsGPT Architecture](docs/newsgpt-architecture.svg)
 
-The editable diagrams.net source is available at
-`docs/newsgpt-architecture.drawio`.
+The editable source diagram is at `docs/newsgpt-architecture.drawio`.
 
-## How It Works
+---
 
-1. The planner turns the user's question into a source-aware search query.
-2. The retriever embeds the query for semantic search.
-3. The BM25 encoder converts the query into sparse keyword values.
-4. Pinecone runs hybrid search using both dense and sparse vectors.
-5. The workflow checks whether the retrieved context is enough.
-6. The answer step writes a source-grounded response with citations.
+## Prerequisites
 
-## Runtime Configuration
+- Python 3.11+
+- [`uv`](https://github.com/astral-sh/uv) (recommended) or pip
+- Docker & Docker Compose (for containerised runs and ingestion)
+- A [Pinecone](https://www.pinecone.io/) account with indexes created for each source
+- An OpenAI API key **or** an Azure OpenAI deployment
 
-Copy `.env.example` to `.env` for local development and fill in real values.
-Never commit real `.env` values.
+---
 
-Required core settings:
+## Quick Start
 
-- `POSTGRESQL_URL`
-- `PINECONE_API_KEY`
-- `PINECONE_INDEX_HOST`
-- `DEFAULT_NEWS_SOURCE`
-
-Source-specific Pinecone and BM25 settings:
-
-- `BARANDBENCH_PINECONE_INDEX_HOST`
-- `BARANDBENCH_PINECONE_NAMESPACE`
-- `BARANDBENCH_BM25_ENCODER_PATH`
-- `SAKAL_PINECONE_INDEX_HOST`
-- `SAKAL_PINECONE_NAMESPACE`
-- `SAKAL_BM25_ENCODER_PATH`
-
-OpenAI settings:
-
-- `OPENAI_API_KEY`
-- `OPENAI_CHAT_MODEL`
-- `OPENAI_CONTEXT_JUDGE_MODEL`
-- `OPENAI_EMBEDDING_MODEL`
-
-Azure OpenAI can be used instead of direct OpenAI by setting:
-
-- `AZURE_OPENAI_API_KEY`
-- `AZURE_OPENAI_ENDPOINT`
-- `AZURE_OPENAI_API_VERSION`
-- `AZURE_OPENAI_EMBEDDING_API_VERSION`
-- `AZURE_OPENAI_CHAT_API_VERSION`
-- `AZURE_OPENAI_EMBEDDING_DEPLOYMENT`
-- `AZURE_OPENAI_CHAT_DEPLOYMENT`
-- `AZURE_OPENAI_PLANNER_DEPLOYMENT`
-- `AZURE_OPENAI_CONTEXT_JUDGE_DEPLOYMENT`
-
-Optional retrieval settings:
-
-- `PINECONE_NAMESPACE` defaults to `default`
-- `BARANDBENCH_BM25_ENCODER_PATH` defaults to `bm25_barandbench_values.json`
-- `SAKAL_BM25_ENCODER_PATH` defaults to `bm25_sakal_values.json`
-- `HYBRID_ALPHA` controls dense-vs-sparse search balance
-- `RERANK_MODE=none` uses Pinecone scores only
-- `RERANK_MODE=jina` enables Jina reranking when `JINA_API_KEY` is set
-- `MAX_CONTEXT_JUDGE_CHARS_PER_SOURCE` caps source text sent to the fast context judge only
-
-## Run Locally
-
-Install dependencies:
+### 1. Clone and install
 
 ```bash
+git clone https://github.com/your-org/news-rag.git
+cd news-rag
 uv sync
 ```
 
-Start the API:
+### 2. Configure environment
+
+```bash
+cp .env.example .env
+# Edit .env and fill in the required values (see Configuration below)
+```
+
+### 3. Start the API
 
 ```bash
 uv run uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Then open:
+| Endpoint | URL |
+|---|---|
+| API root | http://localhost:8000 |
+| Interactive docs | http://localhost:8000/docs |
+| Health check | http://localhost:8000/health |
 
-- API root: `http://localhost:8000`
-- API docs: `http://localhost:8000/docs`
-- Health check: `http://localhost:8000/health`
-
-You can also run with Docker Compose:
+### Docker Compose
 
 ```bash
 docker compose up app
 ```
 
-## Ingestion Scripts
+---
 
-Sakal:
+## Configuration
 
-- `convert_sakal_xml_to_json.py` converts Sakal XML files into `sakal.json`.
-- `ingest_sakal.py` chunks Sakal articles, creates embeddings and BM25 values,
-  and uploads vectors to Pinecone.
+Copy `.env.example` to `.env` and fill in real values. **Never commit `.env`.**
 
-Bar & Bench:
+### Required
 
-- `ingest_barandbench.py` ingests Bar & Bench story dumps into Postgres and
-  Pinecone.
-- `backfill_barandbench_pinecone_published_at.py` backfills Bar & Bench
-  Pinecone metadata for existing chunks.
+| Variable | Description |
+|---|---|
+| `POSTGRESQL_URL` | PostgreSQL connection string |
+| `PINECONE_API_KEY` | Pinecone API key |
+| `PINECONE_INDEX_HOST` | Default Pinecone index host |
+| `DEFAULT_NEWS_SOURCE` | `sakal` or `barandbench` |
+| `OPENAI_API_KEY` | OpenAI API key (or use Azure settings below) |
 
-Run ingestion through Docker Compose profiles when needed:
+### Source-specific
+
+| Variable | Description |
+|---|---|
+| `BARANDBENCH_PINECONE_INDEX_HOST` | Bar & Bench index host |
+| `BARANDBENCH_PINECONE_NAMESPACE` | Bar & Bench namespace |
+| `BARANDBENCH_BM25_ENCODER_PATH` | Path to BM25 values JSON (default: `bm25_barandbench_values.json`) |
+| `SAKAL_PINECONE_INDEX_HOST` | Sakal index host |
+| `SAKAL_PINECONE_NAMESPACE` | Sakal namespace |
+| `SAKAL_BM25_ENCODER_PATH` | Path to BM25 values JSON (default: `bm25_sakal_values.json`) |
+
+### OpenAI
+
+| Variable | Description |
+|---|---|
+| `OPENAI_CHAT_MODEL` | Chat completion model (e.g. `gpt-4o-mini`) |
+| `OPENAI_EMBEDDING_MODEL` | Embedding model (e.g. `text-embedding-3-small`) |
+| `OPENAI_CONTEXT_JUDGE_MODEL` | Model used for context sufficiency check |
+
+### Azure OpenAI (alternative to direct OpenAI)
+
+| Variable | Description |
+|---|---|
+| `AZURE_OPENAI_API_KEY` | Azure OpenAI key |
+| `AZURE_OPENAI_ENDPOINT` | Azure endpoint URL |
+| `AZURE_OPENAI_API_VERSION` | API version |
+| `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Embedding deployment name |
+| `AZURE_OPENAI_CHAT_DEPLOYMENT` | Chat deployment name |
+| `AZURE_OPENAI_PLANNER_DEPLOYMENT` | Planner deployment name |
+| `AZURE_OPENAI_CONTEXT_JUDGE_DEPLOYMENT` | Context judge deployment name |
+
+### Retrieval (optional)
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYBRID_ALPHA` | `0.5` | Dense-vs-sparse balance (0 = sparse only, 1 = dense only) |
+| `RETRIEVAL_TOP_K` | `10` | Number of chunks to retrieve |
+| `RERANK_MODE` | `none` | `none` (Pinecone scores) or `jina` (Jina reranker) |
+| `JINA_API_KEY` | — | Required when `RERANK_MODE=jina` |
+| `MAX_CONTEXT_JUDGE_CHARS_PER_SOURCE` | `1500` | Max chars sent to the context judge per source |
+
+---
+
+## Ingestion
+
+### Sakal
 
 ```bash
+# 1. Convert XML dumps to JSON
+python convert_sakal_xml_to_json.py
+
+# 2. Chunk, embed, and upload to Pinecone
 docker compose --profile ingest run ingest-sakal
-docker compose --profile ingest run ingest-barandbench
 ```
+
+### Bar & Bench
+
+```bash
+# Ingest story dumps into Postgres + Pinecone
+docker compose --profile ingest run ingest-barandbench
+
+# Backfill published_at metadata for existing Pinecone chunks (if needed)
+python backfill_barandbench_pinecone_published_at.py
+```
+
+---
 
 ## Tests
 
-Run the unit test suite:
-
 ```bash
 uv run python -m unittest discover -s tests
+```
+
+---
+
+## Project Structure
+
+```
+news-rag/
+├── app/
+│   ├── agents/          # LangGraph agent definitions
+│   ├── config.py        # Settings (pydantic-settings)
+│   ├── embeddings.py    # Embedding helpers
+│   ├── retrieval.py     # Hybrid retrieval logic
+│   ├── sparse.py        # BM25 sparse encoder
+│   └── vectorstore.py   # Pinecone client wrapper
+├── docs/                # Architecture diagrams
+├── tests/               # Unit tests
+├── main.py              # FastAPI application entry point
+├── ingest_sakal.py      # Sakal ingestion script
+├── ingest_barandbench.py# Bar & Bench ingestion script
+├── .env.example         # Environment variable template
+├── docker-compose.yml
+└── pyproject.toml
 ```
