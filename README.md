@@ -141,6 +141,7 @@ Copy `.env.example` to `.env` and fill in real values. **Never commit `.env`.**
 | `OPENAI_CHAT_MODEL` | Chat completion model (e.g. `gpt-4o-mini`) |
 | `OPENAI_EMBEDDING_MODEL` | Embedding model (e.g. `text-embedding-3-small`) |
 | `OPENAI_CONTEXT_JUDGE_MODEL` | Model used for context sufficiency check |
+| `OPENAI_CONTENT_KIND_MODEL` | Optional model for Bar & Bench article-type classification |
 
 ### Azure OpenAI (alternative to direct OpenAI)
 
@@ -153,6 +154,7 @@ Copy `.env.example` to `.env` and fill in real values. **Never commit `.env`.**
 | `AZURE_OPENAI_CHAT_DEPLOYMENT` | Chat deployment name |
 | `AZURE_OPENAI_PLANNER_DEPLOYMENT` | Planner deployment name |
 | `AZURE_OPENAI_CONTEXT_JUDGE_DEPLOYMENT` | Context judge deployment name |
+| `AZURE_OPENAI_CONTENT_KIND_DEPLOYMENT` | Article-type classification deployment name |
 
 ### Retrieval (optional)
 

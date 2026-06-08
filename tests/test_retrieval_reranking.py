@@ -1,14 +1,23 @@
 import unittest
 from unittest.mock import patch
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from app.agents.workflow import (
     answer_system_prompt_for_source,
     response_language_for_question,
 )
+from app.barandbench_content_kind import (
+    BARANDBENCH_CONTENT_KIND_JOB_POSTING,
+    BARANDBENCH_CONTENT_KIND_NEWS_ARTICLE,
+)
+from app.barandbench_sources import build_barandbench_sources_from_postgres
 from app.agents.prompts import planner_source_prompt, query_rewrite_source_prompt
 from app.config import settings
 from app.retrieval import (
+    barandbench_content_kind_for_chunk,
     build_pinecone_date_filter,
+    filter_source_guardrailed_chunks,
     format_match,
     rerank_chunks_by_story,
     retrieve_chunks,
@@ -251,6 +260,134 @@ class RetrievalRerankingTests(unittest.TestCase):
             "In Pune Market Yard, which vegetables became costlier?",
         )
         self.assertEqual(embedded_query, sparse_query)
+
+    def test_barandbench_content_kind_uses_metadata_when_present(self) -> None:
+        chunk = RetrievedChunk(
+            id="job-story-1",
+            story_id="job-story",
+            headline="Applications invited for Law Clerk positions",
+            published_at="2026-04-01",
+            content_kind=BARANDBENCH_CONTENT_KIND_JOB_POSTING,
+            chunk_text="Applications are invited for law clerk positions.",
+        )
+
+        with patch(
+            "app.retrieval.classify_barandbench_chunk_content_kind"
+        ) as mock_classifier:
+            content_kind = barandbench_content_kind_for_chunk(chunk)
+
+        mock_classifier.assert_not_called()
+        self.assertEqual(content_kind, BARANDBENCH_CONTENT_KIND_JOB_POSTING)
+
+    def test_filter_source_guardrailed_chunks_uses_llm_fallback_when_metadata_missing(self) -> None:
+        job_chunk = RetrievedChunk(
+            id="job-story-1-0",
+            story_id="job-story-1",
+            chunk_index=0,
+            headline="Applications invited for Law Clerk positions",
+            published_at="2026-04-01",
+            categories=["Careers"],
+            chunk_text="Applications are invited for law clerk positions.",
+        )
+        news_chunk = RetrievedChunk(
+            id="news-story-1-0",
+            story_id="news-story-1",
+            chunk_index=0,
+            headline="Supreme Court hears recruitment dispute",
+            published_at="2026-04-02",
+            categories=["Litigation"],
+            chunk_text="The Supreme Court heard a challenge to a recruitment process.",
+        )
+
+        with patch(
+            "app.retrieval.classify_barandbench_chunk_content_kind",
+            side_effect=[
+                BARANDBENCH_CONTENT_KIND_JOB_POSTING,
+                BARANDBENCH_CONTENT_KIND_NEWS_ARTICLE,
+            ],
+        ) as mock_classifier:
+            filtered = filter_source_guardrailed_chunks(
+                [job_chunk, news_chunk],
+                source="barandbench",
+            )
+
+        self.assertEqual([chunk.story_id for chunk in filtered], ["news-story-1"])
+        self.assertEqual(mock_classifier.call_count, 2)
+
+    def test_retrieve_chunks_filters_barandbench_job_postings(self) -> None:
+        matches = [
+            {
+                "id": "job-story-1-0",
+                "score": 0.95,
+                "metadata": {
+                    "story_id": "job-story-1",
+                    "chunk_index": 0,
+                    "headline": "Applications invited for Law Clerk positions",
+                    "published_at": "2026-04-01",
+                    "content_kind": BARANDBENCH_CONTENT_KIND_JOB_POSTING,
+                    "topics": ["Legal Jobs"],
+                    "categories": ["Careers"],
+                    "chunk_text": "Applications are invited for law clerk positions.",
+                },
+            }
+        ]
+
+        with (
+            patch("app.retrieval.embed_text", return_value=[0.1]),
+            patch(
+                "app.retrieval.encode_sparse_query",
+                return_value={"indices": [], "values": []},
+            ),
+            patch("app.retrieval.hybrid_query", return_value={"matches": matches}),
+        ):
+            chunks = retrieve_chunks(
+                "Supreme Court law clerk jobs",
+                top_k=3,
+                source="barandbench",
+            )
+
+        self.assertEqual(chunks, [])
+
+
+class BarAndBenchHydrationFallbackTests(unittest.TestCase):
+    def test_barandbench_falls_back_to_chunk_context_when_postgres_lookup_fails(self) -> None:
+        chunk = RetrievedChunk(
+            id="story-1-0",
+            story_id="story-1",
+            chunk_index=0,
+            headline="Court grants interim relief",
+            published_at="2026-04-01",
+            topics=["Constitution"],
+            categories=["Litigation"],
+            chunk_text="The High Court granted interim relief after hearing both sides.",
+            retrieval_score=0.91,
+        )
+
+        class FailingSession:
+            def get(self, model, story_uuid):
+                raise SQLAlchemyError("database unavailable")
+
+            def close(self):
+                return None
+
+        with patch(
+            "app.barandbench_sources.SessionLocal",
+            return_value=FailingSession(),
+        ):
+            sources = build_barandbench_sources_from_postgres(
+                chunks=[chunk],
+                max_sources=5,
+                max_context_chars=2000,
+            )
+
+        self.assertEqual(len(sources), 1)
+        self.assertEqual(sources[0].article_id, "story-1")
+        self.assertEqual(sources[0].headline, "Court grants interim relief")
+        self.assertEqual(sources[0].published_at, "2026-04-01")
+        self.assertIn(
+            "The High Court granted interim relief after hearing both sides.",
+            sources[0].match_snippet,
+        )
 
 
 if __name__ == "__main__":

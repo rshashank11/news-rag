@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     openai_chat_model: str = "gpt-4o-mini"
     openai_planner_model: str = ""
     openai_context_judge_model: str = ""
+    openai_content_kind_model: str = ""
 
     azure_openai_api_key: str = ""
     azure_openai_endpoint: str = ""
@@ -27,6 +28,7 @@ class Settings(BaseSettings):
     azure_openai_chat_deployment: str = ""
     azure_openai_planner_deployment: str = ""
     azure_openai_context_judge_deployment: str = ""
+    azure_openai_content_kind_deployment: str = ""
 
     pinecone_api_key: str
     pinecone_index_host: str

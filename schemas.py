@@ -133,6 +133,7 @@ class RetrievedChunk(StrictBaseModel):
     chunk_index: int | None = Field(default=None, ge=0)
     headline: str = Field(default="Untitled", max_length=500)
     published_at: str | None = None
+    content_kind: Literal["news_article", "job_posting", "other"] | None = None
     topics: list[str] = Field(default_factory=list, max_length=50)
     categories: list[str] = Field(default_factory=list, max_length=50)
     retrieval_score: float | None = None

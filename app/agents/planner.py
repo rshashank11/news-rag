@@ -40,7 +40,6 @@ PLANNER_FILLER_TOKENS = {
     "which",
 }
 
-
 def clarification_analysis(question: str, message: str) -> QueryAnalysis:
     """
     Build a planner result when the question is too vague to search.

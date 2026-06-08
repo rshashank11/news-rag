@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from pinecone.grpc import PineconeGRPC as Pinecone
 from pinecone_text.sparse import BM25Encoder
 
+from app.barandbench_content_kind import classify_barandbench_story_content_kind
 from app.embeddings import embed_texts
 from app.legal_extraction import extract_courts, extract_statutes, extract_case_type
 from app.legal_tokenizer import apply_legal_tokenizer
@@ -417,6 +418,7 @@ def flush_chunks(index, namespace, pending_chunks, bm25_encoder):
                     "court": chunk["court"],
                     "statutes": chunk["statutes"],
                     "case_type": chunk["case_type"],
+                    "content_kind": chunk["content_kind"],
                     "chunk_text": chunk["chunk_text"],
                 },
             }
@@ -503,6 +505,12 @@ def ingest_files(file_paths: list[str]):
             story_courts = extract_courts(legal_text)
             story_statutes = extract_statutes(legal_text)
             story_case_type = extract_case_type(legal_text)
+            story_content_kind = classify_barandbench_story_content_kind(
+                headline=data.get("headline", "Untitled"),
+                summary=data.get("seo", {}).get("meta-description", ""),
+                categories=categories,
+                full_content=full_content,
+            )
 
             existing_story = db.get(StoryMetaData, story_id)
 
@@ -535,6 +543,7 @@ def ingest_files(file_paths: list[str]):
                         "court": story_courts,
                         "statutes": story_statutes,
                         "case_type": story_case_type,
+                        "content_kind": story_content_kind,
                         "chunk_text": paragraph,
                         "source_path": str(path),
                         "source_line": line_number,

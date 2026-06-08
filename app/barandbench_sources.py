@@ -1,5 +1,8 @@
+import logging
 import uuid
 from datetime import datetime
+
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.source_context import (
     build_combined_source_context,
@@ -9,6 +12,8 @@ from app.source_context import (
 from database import SessionLocal
 from models import StoryMetaData
 from schemas import NewsSource, RetrievedChunk
+
+logger = logging.getLogger(__name__)
 
 
 def story_id_to_uuid(story_id: str | None) -> uuid.UUID | None:
@@ -111,7 +116,18 @@ def build_barandbench_sources_from_postgres(
     """
     sources = []
     seen_story_ids = set()
-    db = SessionLocal()
+    db = None
+    postgres_available = True
+
+    try:
+        db = SessionLocal()
+    except Exception as exc:
+        postgres_available = False
+        logger.warning(
+            "Bar & Bench Postgres session could not be created; "
+            "falling back to Pinecone chunk context. Error: %s",
+            exc,
+        )
 
     try:
         for chunk in chunks:
@@ -122,8 +138,21 @@ def build_barandbench_sources_from_postgres(
 
             seen_story_ids.add(dedupe_key)
 
+            story = None
             story_uuid = story_id_to_uuid(chunk.story_id)
-            story = db.get(StoryMetaData, story_uuid) if story_uuid else None
+
+            if postgres_available and db is not None and story_uuid:
+                try:
+                    story = db.get(StoryMetaData, story_uuid)
+                except SQLAlchemyError as exc:
+                    postgres_available = False
+                    logger.warning(
+                        "Bar & Bench Postgres lookup failed for story_id=%s; "
+                        "falling back to Pinecone chunk context for this and "
+                        "remaining sources. Error: %s",
+                        chunk.story_id,
+                        exc,
+                    )
 
             if story:
                 headline = story.headline or chunk.headline
@@ -157,4 +186,5 @@ def build_barandbench_sources_from_postgres(
         return sources
 
     finally:
-        db.close()
+        if db is not None:
+            db.close()

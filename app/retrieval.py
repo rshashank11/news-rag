@@ -1,6 +1,11 @@
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from app.barandbench_content_kind import (
+    BARANDBENCH_CONTENT_KIND_JOB_POSTING,
+    classify_barandbench_chunk_content_kind,
+    normalize_content_kind,
+)
 from app.config import settings
 from app.embeddings import embed_text
 from app.legal_extraction import CANONICAL_COURT_MAP, KNOWN_COURT_NAMES, extract_courts
@@ -282,6 +287,7 @@ def format_match(match, source: str | None = None) -> RetrievedChunk | None:
         chunk_index=metadata.get("chunk_index"),
         headline=metadata.get("headline") or "Untitled",
         published_at=metadata.get(profile.published_at_metadata_field),
+        content_kind=normalize_content_kind(metadata.get("content_kind")),
         topics=list_metadata_values(metadata.get(profile.topics_metadata_field)),
         categories=metadata_categories_for_source(metadata, source),
         retrieval_score=get_match_score(match),
@@ -307,6 +313,57 @@ def dedupe_chunks(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
         unique_chunks.append(chunk)
 
     return unique_chunks
+
+
+def barandbench_content_kind_for_chunk(chunk: RetrievedChunk) -> str | None:
+    """
+    Resolve Bar & Bench content kind from metadata, then LLM fallback.
+
+    Future re-ingestion stores content_kind directly in Pinecone metadata.
+    Older indexes may not have it yet, so we can still classify from the
+    headline/categories/chunk text at runtime.
+    """
+    if chunk.content_kind is not None:
+        return chunk.content_kind
+
+    return classify_barandbench_chunk_content_kind(
+        headline=chunk.headline,
+        categories=chunk.categories,
+        chunk_text=chunk.chunk_text,
+    )
+
+
+def filter_source_guardrailed_chunks(
+    chunks: list[RetrievedChunk],
+    source: str | None = None,
+) -> list[RetrievedChunk]:
+    """
+    Exclude content that should not participate in normal answer generation.
+
+    For Bar & Bench, filter out stories classified as job_posting. Use one
+    content-kind decision per story so multiple chunks from the same article do
+    not trigger repeated classification calls.
+    """
+    source_name = settings.news_source_config(source)["source"]
+
+    if source_name != "barandbench":
+        return chunks
+
+    story_decisions: dict[str, str | None] = {}
+    filtered_chunks = []
+
+    for chunk in chunks:
+        chunk_story_key = chunk.story_id or chunk.id
+
+        if chunk_story_key not in story_decisions:
+            story_decisions[chunk_story_key] = barandbench_content_kind_for_chunk(chunk)
+
+        if story_decisions[chunk_story_key] == BARANDBENCH_CONTENT_KIND_JOB_POSTING:
+            continue
+
+        filtered_chunks.append(chunk)
+
+    return filtered_chunks
 
 
 def story_key(chunk: RetrievedChunk) -> str:
@@ -587,9 +644,13 @@ def retrieve_chunks(
         if document_matches_date_filter(chunk, from_date, to_date):
             chunks.append(chunk)
 
+    chunks = filter_source_guardrailed_chunks(
+        dedupe_chunks(chunks),
+        source=source,
+    )
     chunks = rerank_chunks_by_story(
         cleaned_query,
-        dedupe_chunks(chunks),
+        chunks,
     )
 
     if chunks or metadata_filter is None:
@@ -620,9 +681,13 @@ def retrieve_chunks(
             if document_matches_date_filter(chunk, from_date, to_date):
                 date_only_chunks.append(chunk)
 
+        date_only_chunks = filter_source_guardrailed_chunks(
+            dedupe_chunks(date_only_chunks),
+            source=source,
+        )
         date_only_chunks = rerank_chunks_by_story(
             cleaned_query,
-            dedupe_chunks(date_only_chunks),
+            date_only_chunks,
         )
 
         if date_only_chunks:
@@ -649,9 +714,13 @@ def retrieve_chunks(
         if document_matches_date_filter(chunk, from_date, to_date):
             fallback_chunks.append(chunk)
 
+    fallback_chunks = filter_source_guardrailed_chunks(
+        dedupe_chunks(fallback_chunks),
+        source=source,
+    )
     return rerank_chunks_by_story(
         cleaned_query,
-        dedupe_chunks(fallback_chunks),
+        fallback_chunks,
     )[:search_top_k]
 
 

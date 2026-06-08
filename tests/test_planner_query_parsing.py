@@ -1,6 +1,7 @@
 import unittest
 
 from app.agents.planner import normalize_analysis_search_query
+from app.agents.prompts import PLANNER_SYSTEM_PROMPT
 from schemas import QueryAnalysis
 
 
@@ -67,6 +68,9 @@ class PlannerQueryParsingTests(unittest.TestCase):
         )
 
         self.assertEqual(normalized.search_query, "need details")
+
+    def test_planner_prompt_mentions_job_board_guardrail(self) -> None:
+        self.assertIn("it is not a job board", PLANNER_SYSTEM_PROMPT)
 
 
 if __name__ == "__main__":

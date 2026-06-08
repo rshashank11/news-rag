@@ -268,3 +268,13 @@ def get_query_rewrite_model() -> str:
 
 def get_answer_model() -> str:
     return get_chat_model()
+
+
+def get_content_kind_model() -> str:
+    if use_azure_chat() and settings.azure_openai_content_kind_deployment:
+        return settings.azure_openai_content_kind_deployment
+
+    if settings.openai_content_kind_model:
+        return settings.openai_content_kind_model
+
+    return get_planner_model()
